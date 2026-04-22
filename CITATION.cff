@@ -1,0 +1,60 @@
+cff-version: 1.2.0
+message: "If you use CORAL in your research, please cite the preprint below."
+type: software
+title: "CORAL: Cross-attention for RNA-protein Association Learning"
+authors:
+  - family-names: Catalano
+    given-names: Mario
+    affiliation: "Department of Biology, University of Rome Tor Vergata; PhD Program in Cellular and Molecular Biology"
+    email: mariocat990@gmail.com
+  - family-names: Pepe
+    given-names: Gerardo
+    affiliation: "Department of Biology, University of Rome Tor Vergata"
+  - family-names: Ausiello
+    given-names: Gabriele
+    affiliation: "Department of Biology, University of Rome Tor Vergata"
+  - family-names: McWhite
+    given-names: Claire
+    affiliation: "Department of Molecular and Cellular Biology, The University of Arizona"
+  - family-names: Gambosi
+    given-names: Giorgio
+    affiliation: "Department of Enterprise Engineering, University of Rome Tor Vergata"
+  - family-names: Helmer Citterich
+    given-names: Manuela
+    affiliation: "Department of Biology, University of Rome Tor Vergata"
+  - family-names: Gherardini
+    given-names: PierFederico
+    affiliation: "Department of Biology, University of Rome Tor Vergata"
+    email: pier.federico.gherardini@uniroma2.it
+repository-code: "https://github.com/MarioCatalano99/Coral"
+license: Apache-2.0
+keywords:
+  - RNA-protein interactions
+  - cross-attention
+  - deep learning
+  - language models
+  - generalization
+  - interpretability
+preferred-citation:
+  type: article
+  title: "Cross-Attention Over RNA And Protein Sequences Enables Generalizable Interaction Prediction"
+  authors:
+    - family-names: Catalano
+      given-names: Mario
+    - family-names: Pepe
+      given-names: Gerardo
+    - family-names: Ausiello
+      given-names: Gabriele
+    - family-names: McWhite
+      given-names: Claire
+    - family-names: Gambosi
+      given-names: Giorgio
+    - family-names: Helmer Citterich
+      given-names: Manuela
+    - family-names: Gherardini
+      given-names: PierFederico
+  year: 2026
+  # TODO: replace with real DOI once the bioRxiv preprint is posted
+  doi: "10.1101/2026.04.22.000000"
+  url: "https://www.biorxiv.org/content/10.1101/2026.04.22.000000v1"
+  journal: "bioRxiv"

@@ -1,0 +1,61 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Packaging
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+pip-log.txt
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+.python-version
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Experiment artefacts
+wandb/
+runs/
+results/
+logs/
+*.log
+
+# Large binaries that should not live in git
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+*.h5
+*.hdf5
+
+# Project-specific
+# NOTE: DNABERT-2-117M/ is committed (modified source for newer-PyTorch
+# compatibility); pytorch_model.bin is excluded by the *.bin rule above
+# and must be fetched via scripts/download_dnabert_weights.sh
+/DNABERT-2-117M/.cache/
+/Data/datasets/
+/checkpoints/
