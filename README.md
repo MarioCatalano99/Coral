@@ -163,7 +163,8 @@ All training and benchmarking splits are archived on Zenodo and fetched with
 Licensing of the redistributed data follows the licenses of the source
 databases; consult each source for details.
 
-Zenodo DOI: `TODO: <zenodo-doi>` — to be filled in when the archive is minted.
+[![Weights DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19729893.svg)](https://doi.org/10.5281/zenodo.19729893)
+[![Data DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19730810.svg)](https://doi.org/10.5281/zenodo.19730810)
 
 ## Model weights
 

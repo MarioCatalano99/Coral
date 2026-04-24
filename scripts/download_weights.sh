@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${ROOT}/weights/coral-epoch-9"
-URL="https://zenodo.org/record/TODO/files/coral-epoch-9.tar.gz"
+URL="https://zenodo.org/records/19729893/files/coral-epoch-9.tar.gz"
 
 mkdir -p "${TARGET}"
 echo "Downloading CORAL weights from ${URL}..."

@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${ROOT}/Data/datasets"
-URL="https://zenodo.org/record/TODO/files/coral-benchmarks.tar.gz"
+URL="https://zenodo.org/records/19730810/files/coral-benchmarks.tar.gz"
 
 mkdir -p "${TARGET}"
 echo "Downloading CORAL benchmark splits from ${URL}..."
