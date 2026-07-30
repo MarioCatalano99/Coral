@@ -57,5 +57,14 @@ logs/
 # compatibility); pytorch_model.bin is excluded by the *.bin rule above
 # and must be fetched via scripts/download_dnabert_weights.sh
 /DNABERT-2-117M/.cache/
-/data/datasets/
 /checkpoints/
+
+# data/ is ignored wholesale for now — 6.3 GB of splits, Pfam, PDB structures,
+# predictions and derived FASTA, all either fetched or regenerable. Which
+# subsets are worth committing is still to be decided; until then nothing new
+# under data/ enters the index.
+#
+# NOTE: gitignore has no trailing-comment syntax. A pattern line is taken
+# literally to end-of-line, so `/data/foo/  # why` matches nothing. Keep
+# comments on their own lines.
+/data/
