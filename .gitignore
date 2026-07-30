@@ -57,5 +57,5 @@ logs/
 # compatibility); pytorch_model.bin is excluded by the *.bin rule above
 # and must be fetched via scripts/download_dnabert_weights.sh
 /DNABERT-2-117M/.cache/
-/Data/datasets/
+/data_tmp/datasets/
 /checkpoints/
