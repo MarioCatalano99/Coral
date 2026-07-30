@@ -51,8 +51,8 @@ def parse_args() -> argparse.Namespace:
                    help="Dataset split name, e.g. componentwise_splits_60_80, pairwise_splits_30_50, redundant_split")
     p.add_argument("--fold", type=int, required=True,
                    help="Fold random-seed identifier (subdirectory name under the split)")
-    p.add_argument("--data-root", default="Data/datasets",
-                   help="Root directory containing split subdirectories (default: Data/datasets)")
+    p.add_argument("--data-root", default="data/datasets",
+                   help="Root directory containing split subdirectories (default: data/datasets)")
     p.add_argument("--output-dir", default="results",
                    help="Output directory for metrics (default: results/)")
     p.add_argument("--rna-encoder", default="./DNABERT-2-117M",
