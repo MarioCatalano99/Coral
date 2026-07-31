@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Download the trained CORAL weights from Zenodo into checkpoints/coral-epoch-9/.
 #
-# TODO: <zenodo-weights-url>  (replace the URL below when the Zenodo record is minted)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${ROOT}/checkpoints/coral-epoch-9"
-URL="https://zenodo.org/records/19729893/files/coral-epoch-9.tar.gz"
+# Concept DOI: always resolves to the newest version of the record.
+# Versions before v2 hold a checkpoint that does not match the published
+# architecture (LoRA r=8, no reverse_projection) — do not pin to them.
+CONCEPT_DOI="10.5281/zenodo.19729892"
+URL="https://zenodo.org/doi/${CONCEPT_DOI}/files/coral-epoch-9.tar.gz"
 
 mkdir -p "${TARGET}"
 echo "Downloading CORAL weights from ${URL}..."

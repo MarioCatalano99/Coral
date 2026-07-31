@@ -59,6 +59,10 @@ logs/
 /DNABERT-2-117M/.cache/
 /checkpoints/
 
+# Staging notes for the Zenodo v2 upload. Working files only — they stop being
+# useful once the record is published.
+/docs/zenodo/
+
 # Per-analysis READMEs are development notes, not public documentation.
 # They stay on disk; the top-level README carries what readers need.
 /analyses/*/README.md

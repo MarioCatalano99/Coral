@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Download the CORAL benchmark splits from Zenodo into data/datasets/.
 #
-# TODO: <zenodo-data-url>  (replace the URL below when the Zenodo record is minted)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${ROOT}/data/datasets"
-URL="https://zenodo.org/records/19730810/files/coral-benchmarks.tar.gz"
+# Concept DOI: always resolves to the newest version of the record.
+CONCEPT_DOI="10.5281/zenodo.19730809"
+URL="https://zenodo.org/doi/${CONCEPT_DOI}/files/coral-benchmarks.tar.gz"
 
 mkdir -p "${TARGET}"
 echo "Downloading CORAL benchmark splits from ${URL}..."
