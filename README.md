@@ -101,7 +101,7 @@ Coral/
 ├── docs/assets/             README figures
 ├── environment.yml          Conda environment, pinned
 ├── requirements.txt         Pip mirror of runtime dependencies
-├── pyproject.toml           Packaging + pytest configuration
+├── pyproject.toml           Packaging
 ├── CITATION.cff             Citation metadata
 └── LICENSE                  Apache-2.0
 ```

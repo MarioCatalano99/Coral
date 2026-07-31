@@ -35,17 +35,8 @@ dependencies = [
     "transformers==4.57.3",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8"]
-
 [project.urls]
 Repository = "https://github.com/MarioCatalano99/Coral"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = [
-    "slow: needs the real DNABERT-2 / ESM-2 encoders and a GPU (deselect with '-m \"not slow\"')",
-]
