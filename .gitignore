@@ -59,6 +59,10 @@ logs/
 /DNABERT-2-117M/.cache/
 /checkpoints/
 
+# Per-analysis READMEs are development notes, not public documentation.
+# They stay on disk; the top-level README carries what readers need.
+/analyses/*/README.md
+
 # data/ is ignored wholesale for now — 6.3 GB of splits, Pfam, PDB structures,
 # predictions and derived FASTA, all either fetched or regenerable. Which
 # subsets are worth committing is still to be decided; until then nothing new
