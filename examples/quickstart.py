@@ -11,13 +11,14 @@ from transformers import AutoTokenizer
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from coral import paths
 from coral.inference import predict_interactions
 from coral.model import CoralConfig, CoralPretraining
 
 
-RNA_ENCODER = "./DNABERT-2-117M"
-PROTEIN_ENCODER = "facebook/esm2_t30_150M_UR50D"
-WEIGHTS = ROOT / "weights" / "coral-epoch-9"
+RNA_ENCODER = str(paths.DNABERT_DIR)
+PROTEIN_ENCODER = paths.PROTEIN_ENCODER
+WEIGHTS = paths.checkpoint(9)
 
 pairs = pd.read_csv(ROOT / "examples" / "sample_pairs.csv")
 

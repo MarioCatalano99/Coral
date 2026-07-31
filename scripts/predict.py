@@ -14,6 +14,7 @@ from transformers import AutoTokenizer
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from coral import paths
 from coral.inference import predict_interactions
 from coral.model import CoralConfig, CoralPretraining
 
@@ -22,12 +23,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input-csv", required=True,
                    help="CSV with columns: RNA_id, Protein_id, RNA_seqs, Prot_seqs (labels optional)")
-    p.add_argument("--weights", default="weights/coral-epoch-9",
+    p.add_argument("--weights", default=str(paths.checkpoint(9)),
                    help="Path to the LoRA checkpoint directory")
     p.add_argument("--output", required=True, help="Output CSV path")
-    p.add_argument("--rna-encoder", default="./DNABERT-2-117M",
+    p.add_argument("--rna-encoder", default=str(paths.DNABERT_DIR),
                    help="DNABERT-2 local clone path")
-    p.add_argument("--protein-encoder", default="facebook/esm2_t30_150M_UR50D",
+    p.add_argument("--protein-encoder", default=paths.PROTEIN_ENCODER,
                    help="ESM-2 checkpoint (HF hub id or local path)")
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
