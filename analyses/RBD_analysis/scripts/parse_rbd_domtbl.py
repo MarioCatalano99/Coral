@@ -27,9 +27,9 @@ Example (run from repo root):
   bash analyses/RBD_analysis/scripts/run_hmmscan.sh
 
   python analyses/RBD_analysis/scripts/parse_rbd_domtbl.py \\
-      --domtbl analyses/RBD_analysis/data/predicted_interacting_proteins.domtbl \\
+      --domtbl data/rbd/predicted_interacting_proteins.domtbl \\
       --fasta data/sequences/predicted_interacting_proteins.fa \\
-      --rbd-json analyses/RBD_analysis/data/semiconservative_rbd2pfam.json \\
+      --rbd-json data/rbd/semiconservative_rbd2pfam.json \\
       --out analyses/RBD_analysis/results/rbd_annotations
 """
 
