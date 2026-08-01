@@ -6,9 +6,11 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$HERE/../../.."
-DATA="$ROOT/analyses/RBD_analysis/data"
+DATA="$ROOT/data/rbd"
 SEQS="$ROOT/data/sequences"
 PFAM="$ROOT/data/external/Pfam/Pfam-A.hmm"
+
+mkdir -p "$DATA"
 
 hmmscan --cut_ga --cpu 8 \
     --domtblout "$DATA/predicted_interacting_proteins.domtbl" \
