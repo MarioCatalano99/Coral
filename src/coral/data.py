@@ -1,20 +1,28 @@
 """Data utilities for CORAL: tokenization, collators, and small helpers.
 
-This module consolidates three concerns that used to live in separate files:
+This module consolidates concerns that used to live in separate files:
 
 - `tokenize_function`, `seed_worker`, `specificity_score`, `read_fasta`: general helpers.
 - `CoralDataCollator`: padding + optional MLM masking for training and inference.
 - `DataCollatorForContactPrediction`: padding + structural-contact label construction
-  for the attention-interpretability analysis.
+  for the contact interpretability analysis.
+- `DataCollatorForRBDPrediction`: padding + a 1D per-residue RNA-binding-domain
+  mask for the RBD interpretability analysis.
+
+All three collators emit the same four core keys — `{rna,protein}_input_ids` and
+`{rna,protein}_attention_mask` — plus whatever labels their analysis needs, so a
+caller can swap one for another without touching the training loop.
 """
 
 import random
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import confusion_matrix
+
+from .rbd import intervals_to_residue_mask
 
 
 # --- General helpers ---------------------------------------------------------
@@ -165,6 +173,10 @@ class CoralDataCollator:
             "protein_input_ids": protein_ids,
             "rna_attention_mask": batch_rna["attention_mask"],
             "protein_attention_mask": batch_protein["attention_mask"],
+            # Passed through for callers that need to locate CLS/SEP/PAD, e.g.
+            # attention analyses cropping to pure sequence positions.
+            "rna_special_tokens_mask": batch_rna["special_tokens_mask"],
+            "protein_special_tokens_mask": batch_protein["special_tokens_mask"],
         }
 
         if self.mlm_probability:
@@ -312,4 +324,102 @@ class DataCollatorForContactPrediction:
             "protein_attention_mask": batch_proteins["attention_mask"],
             "contact_labels": contact_labels,
             "contact_keys": contact_keys,
+        }
+
+
+# --- RBD-prediction collator (attention interpretability) --------------------
+
+class DataCollatorForRBDPrediction:
+    """Builds per-residue RNA-binding-domain masks for the protein side.
+
+    Analogue of `DataCollatorForContactPrediction`, but the labels are a 1D
+    per-residue mask (RBD vs non-RBD) rather than a 2D contact matrix. ESM-2
+    emits one token per residue, so no nucleotide-to-BPE mapping is needed and
+    the mask comes straight from the parsed RBD intervals.
+
+    `rbd_labels` is shape (batch, protein_len): `-100` at CLS/EOS/padding,
+    `0`/`1` for non-RBD/RBD residues.
+    """
+
+    def __init__(
+        self,
+        rna_tokenizer,
+        protein_tokenizer,
+        all_rbd_intervals: Dict[str, List[Tuple[int, int]]],
+        padding: bool = True,
+        rna_max_length: Optional[int] = None,
+        protein_max_length: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+    ):
+        self.rna_tokenizer = rna_tokenizer
+        self.protein_tokenizer = protein_tokenizer
+        self.all_rbd_intervals = all_rbd_intervals
+        self.padding = padding
+        self.rna_max_length = rna_max_length
+        self.protein_max_length = protein_max_length
+        self.pad_to_multiple_of = pad_to_multiple_of
+
+    def _pad(self, features, tokenizer, max_length):
+        return tokenizer.pad(
+            features,
+            padding=self.padding,
+            max_length=max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt",
+        )
+
+    def get_rbd_labels(self, batch_proteins, protein_keys):
+        special = batch_proteins["special_tokens_mask"]
+        batch_size, seq_len = special.shape
+        labels = torch.full((batch_size, seq_len), -100, dtype=torch.long)
+
+        for i, key in enumerate(protein_keys):
+            residue_positions = (special[i] == 0).nonzero(as_tuple=False).flatten()
+            n_residues = residue_positions.numel()
+            if n_residues == 0:
+                continue
+            intervals = self.all_rbd_intervals.get(key, [])
+            residue_mask = intervals_to_residue_mask(intervals, n_residues)
+            labels[i, residue_positions] = torch.from_numpy(
+                residue_mask.astype(np.int64)
+            )
+
+        return labels
+
+    def __call__(self, features):
+        features_rna = [
+            {
+                "input_ids": f["rna_input_ids"],
+                "attention_mask": f["rna_attention_mask"],
+                "special_tokens_mask": f["rna_special_tokens_mask"],
+            }
+            for f in features
+        ]
+
+        features_proteins = [
+            {
+                "input_ids": f["protein_input_ids"],
+                "attention_mask": f["protein_attention_mask"],
+                "special_tokens_mask": f["protein_special_tokens_mask"],
+            }
+            for f in features
+        ]
+
+        protein_keys = [f["Protein_id"] for f in features]
+        pair_keys = [f'{f["RNA_id"]}|{f["Protein_id"]}' for f in features]
+
+        batch_rna = self._pad(features_rna, self.rna_tokenizer, self.rna_max_length)
+        batch_proteins = self._pad(features_proteins, self.protein_tokenizer,
+                                   self.protein_max_length)
+
+        rbd_labels = self.get_rbd_labels(batch_proteins, protein_keys)
+
+        return {
+            "rna_input_ids": batch_rna["input_ids"],
+            "protein_input_ids": batch_proteins["input_ids"],
+            "rna_attention_mask": batch_rna["attention_mask"],
+            "protein_attention_mask": batch_proteins["attention_mask"],
+            "rbd_labels": rbd_labels,
+            "protein_keys": protein_keys,
+            "pair_keys": pair_keys,
         }

@@ -2,7 +2,7 @@
 
 Reference implementation of the protocol described in the paper Methods.
 Retraining is hardware-dependent (expect ~24-40 GB VRAM on the longest
-sequences); the released weights at `weights/coral-epoch-9/` are the
+sequences); the released weights at `checkpoints/coral-epoch-9/` are the
 recommended starting point for inference and reproduction of Table 2.
 
 Known seed --> fold-size combinations used in the paper:
@@ -41,6 +41,7 @@ from transformers import AutoTokenizer, get_scheduler
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from coral import paths
 from coral.data import CoralDataCollator, seed_worker, specificity_score, tokenize_function
 from coral.model import CoralConfig, CoralPretraining
 
@@ -51,20 +52,21 @@ def parse_args() -> argparse.Namespace:
                    help="Dataset split name, e.g. componentwise_splits_60_80, pairwise_splits_30_50, redundant_split")
     p.add_argument("--fold", type=int, required=True,
                    help="Fold random-seed identifier (subdirectory name under the split)")
-    p.add_argument("--data-root", default="Data/datasets",
-                   help="Root directory containing split subdirectories (default: Data/datasets)")
-    p.add_argument("--output-dir", default="results",
-                   help="Output directory for metrics (default: results/)")
-    p.add_argument("--rna-encoder", default="./DNABERT-2-117M",
+    p.add_argument("--data-root", default=str(paths.DATASETS_DIR),
+                   help="Root directory containing split subdirectories")
+    p.add_argument("--output-dir", default=str(paths.REPO_ROOT / "results"),
+                   help="Output directory for metrics; created if absent")
+    p.add_argument("--rna-encoder", default=str(paths.DNABERT_DIR),
                    help="DNABERT-2 checkpoint path (local clone is required)")
-    p.add_argument("--protein-encoder", default="facebook/esm2_t30_150M_UR50D",
+    p.add_argument("--protein-encoder", default=paths.PROTEIN_ENCODER,
                    help="ESM-2 checkpoint (HF hub id or local path)")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-6)
     p.add_argument("--warmup-pct", type=float, default=0.05,
                    help="Fraction of total training steps used for linear warmup")
-    p.add_argument("--lora-rank", type=int, default=8)
+    p.add_argument("--lora-rank", type=int, default=16,
+                   help="LoRA rank; 16 is what the released checkpoint was trained with")
     p.add_argument("--mlm-scaling", type=float, default=1.0)
     p.add_argument("--num-threads", type=int, default=12)
     p.add_argument("--seed", type=int, default=42)
@@ -142,7 +144,8 @@ def main() -> None:
         if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
             if name.startswith("bert.protein_encoder") or name.startswith("bert.rna_encoder"):
                 target_modules.append(name)
-            elif any(name.startswith(p) for p in ("bert.cross_encoder", "cls", "bert.projection", "bert.pooler")):
+            elif any(name.startswith(p) for p in ("bert.cross_encoder", "cls", "bert.projection",
+                                                  "bert.pooler", "reverse_projection")):
                 modules_to_save.append(name)
 
     lora_config = LoraConfig(r=args.lora_rank, target_modules=target_modules, modules_to_save=modules_to_save)

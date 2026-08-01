@@ -1,9 +1,32 @@
-from torch import nn
-import torch
+"""CORAL model definition: config, cross-modality encoder, and pre-training wrapper.
+
+A bidirectional cross-attention encoder sits on top of two frozen-then-LoRA-tuned
+backbones — DNABERT-2 for RNA, ESM-2 for protein. Each cross-modality layer runs
+RNA→protein and protein→RNA attention through *separate* weight sets, then
+per-modality self-attention, then per-modality FFNs.
+
+Naming follows the public `coral` package (`CoralConfig` / `Coral` /
+`CoralPretraining`). The *semantics* are those of the architecture that produced
+the published results, which previously lived under
+`mechanistic_interpretability/coral/splitProteinCrossmodel_new.py` as
+`CrossModelConfig` / `CrossModalityRPIpred` / `CrossModalityRPIpredPretraining`.
+
+Every computational expression below is carried over verbatim from that module —
+including the exact activation, softmax, and NaN-handling calls — because
+`tests/test_model_equivalence.py` asserts bit-identical outputs against a frozen
+copy of it (`tests/reference/crossmodel_reference.py`). Submodule *attribute*
+names are likewise unchanged, so state-dict keys and existing checkpoints are
+unaffected by the rename. Do not "clean up" an expression here without running
+that test.
+"""
+
 import math
-import sys
-from transformers import AutoModel, PretrainedConfig, PreTrainedModel
+from typing import Optional
+
+import torch
+from torch import nn
 from torch.nn import CrossEntropyLoss
+from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 
 
 class CoralConfig(PretrainedConfig):
@@ -51,20 +74,13 @@ class CoralConfig(PretrainedConfig):
         self.protein_encoder_checkpoint = protein_encoder_checkpoint
         super().__init__(**kwargs)
 
-def gelu(x):
-    """Implementation of the gelu activation function.
-        For information: OpenAI GPT's gelu is slightly different (and gives slightly different results):
-        0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
-        Also see https://arxiv.org/abs/1606.08415
-    """
-    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
-
+def swish(x):
+    return x * torch.sigmoid(x)
 
 
 def mean_pooling(last_hidden_state, attention_mask):
-    """
-    Performs mean pooling on BERT-style token embeddings, correctly ignoring padding.
+    """Mean-pool BERT-style token embeddings, ignoring padding.
 
     Args:
         last_hidden_state (torch.Tensor): Shape [B, L, D]
@@ -73,26 +89,33 @@ def mean_pooling(last_hidden_state, attention_mask):
     Returns:
         torch.Tensor: Mean pooled representation of shape [B, D]
     """
-    # 1. Expand the attention mask to match the hidden state dimensions [B, L, D].
-    # We cast to the same dtype as the hidden state to ensure compatibility with AMP (fp16/bf16).
+    # Cast to the hidden state's dtype so this stays AMP-safe (fp16/bf16).
     input_mask_expanded = attention_mask.unsqueeze(-1).to(last_hidden_state.dtype)
 
-    # 2. Sum the token embeddings, ignoring masked (padding) tokens.
-    # (Multiplying by 0 for padding tokens before summing)
     sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, dim=1)
 
-    # 3. Calculate the number of valid tokens for each sequence.
-    # Clamp minimum to 1e-9 to avoid division by zero stability issues.
+    # Clamp away from zero: a fully-padded row would otherwise divide by 0.
     sum_mask = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
 
-    # 4. Divide sum by the actual count of valid tokens.
     return sum_embeddings / sum_mask
 
-ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu}
+
+# `gelu` is torch's exact erf formulation (approximate='none'), not the tanh
+# approximation. Swapping it changes the last ulp — see module docstring.
+ACT2FN = {
+    "gelu": torch.nn.functional.gelu,
+    "relu": torch.nn.functional.relu,
+    "swish": swish,
+}
+
+
+def soft_cross_entropy(logits, soft_targets):
+    """Cross-entropy loss with soft (non-one-hot) target distributions."""
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    return -(soft_targets * log_probs).sum(dim=-1).mean()
 
 
 BertLayerNorm = torch.nn.LayerNorm
-
 
 
 class BertAttention(nn.Module):
@@ -120,22 +143,23 @@ class BertAttention(nn.Module):
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states, context, input_att_mask=None, ctx_att_mask=None, output_attentions=False):
+    def forward(self, hidden_states, context, input_att_mask=None, ctx_att_mask=None,
+                output_attentions=False):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(context)
         mixed_value_layer = self.value(context)
-
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
         value_layer = self.transpose_for_scores(mixed_value_layer)
 
-
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
-        # Apply the attention mask
+        # --- Apply the attention mask ---
+        # Masking both axes means a fully-masked row softmaxes to NaN, which the
+        # nan_to_num below flattens to 0. That is load-bearing, not defensive.
         if input_att_mask is not None and ctx_att_mask is not None:
             attention_scores = attention_scores.masked_fill(
                 ctx_att_mask == 0.0, float("-inf")
@@ -149,17 +173,15 @@ class BertAttention(nn.Module):
                 ctx_att_mask == 0.0, float("-inf")
             )
 
-
         # Normalize the attention scores to probabilities.
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
-
-        attention_probs = attention_probs.masked_fill(
-            attention_probs.isnan(), 0.0
-        )
+        attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
+        attention_probs = torch.nan_to_num(attention_probs, nan=0.0)
 
         # Store attention weights if requested
         attention_weights = attention_probs if output_attentions else None
 
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
 
         context_layer = torch.matmul(attention_probs, value_layer)
@@ -191,7 +213,8 @@ class BertCrossattLayer(nn.Module):
         self.att = BertAttention(config)
         self.output = BertAttOutput(config)
 
-    def forward(self, input_tensor, ctx_tensor, input_att_mask=None, ctx_att_mask=None, output_attentions=False):
+    def forward(self, input_tensor, ctx_tensor, input_att_mask=None, ctx_att_mask=None,
+                output_attentions=False):
         att_outputs = self.att(input_tensor, ctx_tensor,
                                input_att_mask=input_att_mask,
                                ctx_att_mask=ctx_att_mask,
@@ -211,7 +234,8 @@ class BertSelfattLayer(nn.Module):
         self.output = BertAttOutput(config)
 
     def forward(self, input_tensor, attention_mask, output_attentions=False):
-        self_outputs = self.self(input_tensor, input_tensor, ctx_att_mask=attention_mask, output_attentions=output_attentions)
+        self_outputs = self.self(input_tensor, input_tensor, ctx_att_mask=attention_mask,
+                                 output_attentions=output_attentions)
         attention_output = self.output(self_outputs[0], input_tensor)
 
         outputs = (attention_output,)
@@ -224,7 +248,7 @@ class BertIntermediate(nn.Module):
     def __init__(self, config):
         super(BertIntermediate, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
-        if isinstance(config.hidden_act, str) or (sys.version_info[0] == 2 and isinstance(config.hidden_act, str)):
+        if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
@@ -252,32 +276,29 @@ class BertOutput(nn.Module):
 class BertPooler(nn.Module):
     def __init__(self, config):
         super(BertPooler, self).__init__()
-        
-        # Normalization layers
+
+        # Per-modality normalization keeps neither modality dominating the
+        # concatenation through sheer magnitude.
         self.rna_layernorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.protein_layernorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        
+
         # Standard projection
         self.dense = nn.Linear(2 * config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
-    def forward(self, rna_hidden_states, rna_attention_mask, protein_hidden_states, protein_attention_mask):
-        # 1. Mean Pool
+    def forward(self, rna_hidden_states, rna_attention_mask,
+                protein_hidden_states, protein_attention_mask):
         rna_pooled = mean_pooling(rna_hidden_states, rna_attention_mask)
         protein_pooled = mean_pooling(protein_hidden_states, protein_attention_mask)
-        
-        # 2. Normalize the pooled vectors independently
-        # This ensures neither modality dominates due to magnitude differences
+
         rna_pooled = self.rna_layernorm(rna_pooled)
         protein_pooled = self.protein_layernorm(protein_pooled)
 
-        # 3. Concatenate
         cat_output = torch.cat([rna_pooled, protein_pooled], axis=-1)
-        
-        # 4. Project
+
         pooled_output = self.dense(cat_output)
         pooled_output = self.activation(pooled_output)
-        
+
         return pooled_output
 
 
@@ -285,7 +306,7 @@ class BertPredictionHeadTransform(nn.Module):
     def __init__(self, config, hidden_size):
         super(BertPredictionHeadTransform, self).__init__()
         self.dense = nn.Linear(hidden_size, hidden_size)
-        if isinstance(config.hidden_act, str) or (sys.version_info[0] == 2 and isinstance(config.hidden_act, str)):
+        if isinstance(config.hidden_act, str):
             self.transform_act_fn = ACT2FN[config.hidden_act]
         else:
             self.transform_act_fn = config.hidden_act
@@ -303,7 +324,8 @@ class BertLMPredictionHead(nn.Module):
         super(BertLMPredictionHead, self).__init__()
         self.transform = BertPredictionHeadTransform(config, bert_model_embedding_weights.size(1))
 
-
+        # The output weights are the same as the input embeddings, but there is
+        # an output-only bias for each token.
         self.decoder = nn.Linear(bert_model_embedding_weights.size(1),
                                  bert_model_embedding_weights.size(0),
                                  bias=False)
@@ -329,6 +351,7 @@ class BertPreTrainingHeads(nn.Module):
         seq_relationship_score = self.seq_relationship(pooled_output)
         return rna_prediction_scores, protein_prediction_scores, seq_relationship_score
 
+
 """
 ---------------------------------------------------------------------------------------
       Above modules are copied from BERT (pytorch-transformer) with modifications.
@@ -339,32 +362,26 @@ class BertPreTrainingHeads(nn.Module):
 class CrossModalityLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # ----------------------------------------------------------------------
-        # Cross-Attention Modules
-        # ----------------------------------------------------------------------
-        # Module 1: RNA is the Query, Protein is the Key/Value
-        self.r2p_cross_attention = BertCrossattLayer(config) 
-        
-        # Module 2: Protein is the Query, RNA is the Key/Value
-        self.p2r_cross_attention = BertCrossattLayer(config) 
-        # ----------------------------------------------------------------------
+        # --- Cross-attention: one weight set per direction ---
+        # Sharing a single module across both directions was the original design
+        # and it under-performed; the two directions learn different things.
+        self.r2p_cross_attention = BertCrossattLayer(config)  # RNA queries, protein keys/values
+        self.p2r_cross_attention = BertCrossattLayer(config)  # protein queries, RNA keys/values
 
-        # Self-attention Layers
+        # --- Per-modality self-attention ---
         self.rna_self_att = BertSelfattLayer(config)
         self.protein_self_att = BertSelfattLayer(config)
 
-        # Intermediate and Output Layers (FFNs)
+        # --- Per-modality feed-forward ---
         self.rna_inter = BertIntermediate(config)
         self.rna_output = BertOutput(config)
         self.protein_inter = BertIntermediate(config)
         self.protein_output = BertOutput(config)
 
-    def cross_att(self, rna_input, rna_attention_mask, protein_input, protein_attention_mask, output_attentions=False):
-        """Cross-attention between RNA and Protein features"""
-
-        # ------------------------------------------------------------------
-        # Direction 1: RNA attends to Protein (Using R2P specific weights)
-        # ------------------------------------------------------------------
+    def cross_att(self, rna_input, rna_attention_mask, protein_input, protein_attention_mask,
+                  output_attentions=False):
+        """Cross-attention between RNA and protein features."""
+        # Direction 1: RNA attends to protein (R2P weights).
         rna_att_outputs = self.r2p_cross_attention(
             rna_input, protein_input,
             input_att_mask=rna_attention_mask,
@@ -373,9 +390,7 @@ class CrossModalityLayer(nn.Module):
         )
         rna_att_output = rna_att_outputs[0]
 
-        # ------------------------------------------------------------------
-        # Direction 2: Protein attends to RNA (Using P2R specific weights)
-        # ------------------------------------------------------------------
+        # Direction 2: protein attends to RNA (P2R weights).
         protein_att_outputs = self.p2r_cross_attention(
             protein_input, rna_input,
             input_att_mask=protein_attention_mask,
@@ -387,16 +402,18 @@ class CrossModalityLayer(nn.Module):
         outputs = (rna_att_output, protein_att_output)
 
         if output_attentions:
-            # Return attention weights: (rna->protein_attention, protein->rna_attention)
+            # (rna->protein attention, protein->rna attention)
             rna_to_protein_att = rna_att_outputs[1] if len(rna_att_outputs) > 1 else None
             protein_to_rna_att = protein_att_outputs[1] if len(protein_att_outputs) > 1 else None
             outputs = outputs + (rna_to_protein_att, protein_to_rna_att)
 
         return outputs
 
-    def self_att(self, rna_input, rna_attention_mask, protein_input, protein_attention_mask, output_attentions=False):
-        """Self-attention separately for RNA and Protein features (Unchanged)"""
-        rna_att_outputs = self.rna_self_att(rna_input, rna_attention_mask, output_attentions=output_attentions)
+    def self_att(self, rna_input, rna_attention_mask, protein_input, protein_attention_mask,
+                 output_attentions=False):
+        """Self-attention separately for RNA and protein features."""
+        rna_att_outputs = self.rna_self_att(rna_input, rna_attention_mask,
+                                            output_attentions=output_attentions)
         protein_att_outputs = self.protein_self_att(protein_input, protein_attention_mask,
                                                     output_attentions=output_attentions)
 
@@ -413,7 +430,7 @@ class CrossModalityLayer(nn.Module):
         return outputs
 
     def output_fc(self, rna_input, protein_input):
-        """Feed-forward networks for final processing (Unchanged)"""
+        """Feed-forward networks for final processing."""
         rna_inter_output = self.rna_inter(rna_input)
         protein_inter_output = self.protein_inter(protein_input)
 
@@ -422,9 +439,8 @@ class CrossModalityLayer(nn.Module):
 
         return rna_output, protein_output
 
-    def forward(self, rna_feats, rna_attention_mask, protein_feats, protein_attention_mask, output_attentions=False):
-        """Forward pass through the cross-modality layer (Unchanged logic, just passes through updated cross_att)"""
-
+    def forward(self, rna_feats, rna_attention_mask, protein_feats, protein_attention_mask,
+                output_attentions=False):
         rna_att_output = rna_feats
         protein_att_output = protein_feats
 
@@ -450,7 +466,6 @@ class CrossModalityLayer(nn.Module):
         outputs = (rna_output, protein_output)
 
         if output_attentions:
-            # Collect all attention weights
             cross_attentions = cross_att_outputs[2:]
             self_attentions = self_att_outputs[2:]
             outputs = outputs + (cross_attentions, self_attentions)
@@ -462,7 +477,6 @@ class CrossModalityEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        # Number of layers
         self.num_cross_layers = config.num_cross_layers
         self.cross_layers = nn.ModuleList(
             [CrossModalityLayer(config) for _ in range(self.num_cross_layers)]
@@ -470,16 +484,16 @@ class CrossModalityEncoder(nn.Module):
 
     def forward(self, rna_feats, rna_attention_mask, protein_feats, protein_attention_mask=None,
                 output_attentions=False):
-
-        # We create a 3D attention mask from a 2D tensor mask.
-        # Sizes are [batch_size, 1, 1, to_seq_length]
-        # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+        # Build a 3D mask from the 2D one: [B, 1, 1, to_seq_len] broadcasts to
+        # [B, num_heads, from_seq_len, to_seq_len]. 1.0 = attend, 0.0 = masked.
         extended_rna_attention_mask = rna_attention_mask.unsqueeze(1).unsqueeze(2)
-        extended_rna_attention_mask = extended_rna_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
+        extended_rna_attention_mask = extended_rna_attention_mask.to(
+            dtype=next(self.parameters()).dtype)  # fp16 compatibility
 
         if protein_attention_mask is not None:
             extended_protein_attention_mask = protein_attention_mask.unsqueeze(1).unsqueeze(2)
-            extended_protein_attention_mask = extended_protein_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
+            extended_protein_attention_mask = extended_protein_attention_mask.to(
+                dtype=next(self.parameters()).dtype)  # fp16 compatibility
         else:
             extended_protein_attention_mask = None
 
@@ -514,18 +528,25 @@ class CrossModalityEncoder(nn.Module):
             all_cross_attentions = [torch.stack(all_rna_cross_attentions, dim=1),
                                     torch.stack(all_protein_cross_attentions, dim=1)]
             all_self_attentions = [torch.stack(all_rna_self_attentions, dim=1),
-                                    torch.stack(all_protein_self_attentions, dim=1)]
+                                   torch.stack(all_protein_self_attentions, dim=1)]
             outputs = outputs + (all_cross_attentions, all_self_attentions)
 
         return outputs
 
 
 class Coral(nn.Module):
+    """The two backbones plus the cross-modality encoder and pooler."""
 
     def __init__(self, config, rna_encoder_checkpoint, protein_encoder_checkpoint):
         super().__init__()
-        self.rna_encoder = AutoModel.from_pretrained(rna_encoder_checkpoint, trust_remote_code=True)
-        self.protein_encoder = AutoModel.from_pretrained(protein_encoder_checkpoint, trust_remote_code=True)
+
+        self.rna_encoder = AutoModel.from_pretrained(
+            rna_encoder_checkpoint,
+            trust_remote_code=True,
+        )
+
+        self.protein_encoder = AutoModel.from_pretrained(protein_encoder_checkpoint,
+                                                         trust_remote_code=True)
         self.projection = nn.Linear(config.protein_encoder_hidden_size, config.hidden_size)
         self.cross_encoder = CrossModalityEncoder(config)
         self.pooler = BertPooler(config)
@@ -534,12 +555,10 @@ class Coral(nn.Module):
 
         rna_hidden_states, _ = self.rna_encoder(**rna_batch)
 
-
         protein_hidden_states = self.protein_encoder(
             input_ids=protein_batch["input_ids"],
             attention_mask=protein_batch["attention_mask"]
         ).last_hidden_state
-
 
         protein_hidden_states = self.projection(protein_hidden_states)
 
@@ -552,7 +571,8 @@ class Coral(nn.Module):
         )
 
         rna_feats, protein_feats = cross_encoder_outputs[0], cross_encoder_outputs[1]
-        pooled_output = self.pooler(rna_feats, rna_batch["attention_mask"], protein_feats, protein_batch["attention_mask"])
+        pooled_output = self.pooler(rna_feats, rna_batch["attention_mask"],
+                                    protein_feats, protein_batch["attention_mask"])
 
         outputs = ((rna_feats, protein_feats), pooled_output)
 
@@ -565,18 +585,27 @@ class Coral(nn.Module):
 
 
 class CoralPretraining(PreTrainedModel):
+    """MLM + interaction-matching heads over the `Coral` backbone."""
+
     config_class = CoralConfig
     base_model_prefix = "Coral"
+    _supports_param_buffer_assignment = False
 
     def __init__(self, config):
         super().__init__(config)
-        # Configuration
         self.config = config
 
         self.softmax = nn.Softmax(dim=1)
 
-        # Model backbone
-        self.bert = Coral(config, config.rna_encoder_checkpoint, config.protein_encoder_checkpoint)
+        # Independent projection back to the protein encoder's hidden size. An
+        # earlier variant reused `bert.projection.weight` transposed; this layer
+        # is learned separately and is the one the released checkpoint carries.
+        self.reverse_projection = nn.Linear(config.hidden_size,
+                                            config.protein_encoder_hidden_size)
+
+        # Backbone. Attribute stays `bert` because checkpoint keys depend on it.
+        self.bert = Coral(config, config.rna_encoder_checkpoint,
+                          config.protein_encoder_checkpoint)
 
         # Pre-training heads
         self.cls = BertPreTrainingHeads(
@@ -585,14 +614,14 @@ class CoralPretraining(PreTrainedModel):
             self.bert.protein_encoder.embeddings.word_embeddings.weight
         )
 
-
-
-    def forward(self, rna_batch, protein_batch, matched_label=None, task_mask_lm=True, task_matched=True, output_attentions=False, mlm_scaling_factor=1):
+    def forward(self, rna_batch, protein_batch, matched_labels=None, soft_matched_labels=None,
+                task_mask_lm=True, task_matched=True, output_attentions=False,
+                mlm_scaling_factor=1):
 
         bert_outputs = self.bert(rna_batch, protein_batch, output_attentions=output_attentions)
 
         (rna_output, protein_output), pooled_output = bert_outputs[0], bert_outputs[1]
-        protein_output = protein_output @ self.bert.projection.weight
+        protein_output = self.reverse_projection(protein_output)
 
         # Extract attention weights if requested
         cross_attentions = bert_outputs[2] if output_attentions and len(bert_outputs) > 2 else None
@@ -608,9 +637,8 @@ class CoralPretraining(PreTrainedModel):
         else:
             protein_masked_lm_labels = None
 
-
         rna_prediction_scores, protein_prediction_scores, cross_relationship_score = self.cls(
-                rna_output, protein_output, pooled_output
+            rna_output, protein_output, pooled_output
         )
 
         total_loss = 0.
@@ -633,10 +661,18 @@ class CoralPretraining(PreTrainedModel):
             total_loss += mlm_scaling_factor * protein_masked_lm_loss
             losses += (protein_masked_lm_loss.detach(),)
 
-        if matched_label is not None and task_matched:
+        # Soft targets win when both are supplied.
+        if soft_matched_labels is not None and task_matched:
+            matched_loss = soft_cross_entropy(
+                cross_relationship_score.view(-1, 2),
+                soft_matched_labels.view(-1, 2)
+            )
+            total_loss += matched_loss
+            losses += (matched_loss.detach(),)
+        elif matched_labels is not None and task_matched:
             matched_loss = loss_fct(
                 cross_relationship_score.view(-1, 2),
-                matched_label.view(-1)
+                matched_labels.view(-1)
             )
             total_loss += matched_loss
             losses += (matched_loss.detach(),)

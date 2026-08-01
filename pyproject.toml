@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coral-rpi"
+version = "1.0.0"
+description = "Cross-Attention for RNA-protein Association Learning"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Mario Catalano", email = "mariocat990@gmail.com" }]
+
+# Runtime pins mirror environment.yml / requirements.txt exactly: these are the
+# versions the paper results were produced with.
+dependencies = [
+    "accelerate==1.12.0",
+    "datasets==4.4.1",
+    "einops==0.8.1",
+    "huggingface-hub==0.36.0",
+    "matplotlib==3.10.8",
+    "numpy==2.2.6",
+    "pandas==2.3.3",
+    "peft==0.18.0",
+    "pyarrow==22.0.0",
+    "pyyaml==6.0.3",
+    "safetensors==0.7.0",
+    "scikit-learn==1.7.2",
+    "scipy==1.15.3",
+    "seaborn==0.13.2",
+    "statsmodels==0.14.6",
+    "tokenizers==0.22.1",
+    "torch==2.6.0",
+    "tqdm==4.67.1",
+    "transformers==4.57.3",
+]
+
+[project.urls]
+Repository = "https://github.com/MarioCatalano99/Coral"
+
+[tool.setuptools.packages.find]
+where = ["src"]

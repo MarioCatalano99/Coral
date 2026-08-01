@@ -29,11 +29,11 @@ authors:
 repository-code: "https://github.com/MarioCatalano99/Coral"
 identifiers:
   - type: doi
-    value: "10.5281/zenodo.19730810"
-    description: "CORAL benchmark splits (dataset) on Zenodo"
+    value: "10.5281/zenodo.19730809"
+    description: "CORAL benchmark splits (dataset) on Zenodo — concept DOI, resolves to latest version"
   - type: doi
-    value: "10.5281/zenodo.19729893"
-    description: "CORAL trained model weights on Zenodo"
+    value: "10.5281/zenodo.19729892"
+    description: "CORAL trained model weights on Zenodo — concept DOI, resolves to latest version"
 license: Apache-2.0
 keywords:
   - RNA-protein interactions
