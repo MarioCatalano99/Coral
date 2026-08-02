@@ -300,7 +300,7 @@ If you use CORAL in your research, please cite the preprint:
   journal = {bioRxiv},
   year    = {2026},
   doi     = {10.64898/2026.04.22.720174},
-  url     = {https://www.biorxiv.org/content/10.64898/2026.04.22.720174v1}
+  url     = {https://www.biorxiv.org/content/10.64898/2026.04.22.720174v2}
 }
 ```
 

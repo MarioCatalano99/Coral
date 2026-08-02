@@ -61,7 +61,6 @@ preferred-citation:
     - family-names: Gherardini
       given-names: PierFederico
   year: 2026
-  # TODO: replace with real DOI once the bioRxiv preprint is posted
-  doi: "10.1101/2026.04.22.000000"
-  url: "https://www.biorxiv.org/content/10.1101/2026.04.22.000000v1"
+  doi: "10.64898/2026.04.22.720174"
+  url: "https://www.biorxiv.org/content/10.64898/2026.04.22.720174v2"
   journal: "bioRxiv"
