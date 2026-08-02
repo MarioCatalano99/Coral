@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![bioRxiv](https://img.shields.io/badge/bioRxiv-TODO-red)](https://www.biorxiv.org/)
+[![bioRxiv](https://img.shields.io/badge/bioRxiv-10.64898%2F2026.04.22.720174-red)](https://doi.org/10.64898/2026.04.22.720174)
 
 ## Summary
 
@@ -299,8 +299,8 @@ If you use CORAL in your research, please cite the preprint:
   author  = {Catalano, Mario and Pepe, Gerardo and Ausiello, Gabriele and McWhite, Claire and Gambosi, Giorgio and Helmer Citterich, Manuela and Gherardini, PierFederico},
   journal = {bioRxiv},
   year    = {2026},
-  doi     = {TODO:10.1101/2026.04.22.000000},
-  url     = {TODO:https://www.biorxiv.org/content/10.1101/2026.04.22.000000v1}
+  doi     = {10.64898/2026.04.22.720174},
+  url     = {https://www.biorxiv.org/content/10.64898/2026.04.22.720174v1}
 }
 ```
 
