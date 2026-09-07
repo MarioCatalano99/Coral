@@ -5,6 +5,7 @@ from .model import Coral, CoralConfig, CoralPretraining
 from .data import (
     CoralDataCollator,
     DataCollatorForContactPrediction,
+    DataCollatorForInference,
     DataCollatorForRBDPrediction,
 )
 from .attention import AttentionAnalyzer
@@ -16,7 +17,8 @@ from .stats import (
     hierarchical_bootstrap,
 )
 from .inference import (
-    predict_allVsall_interactions,
+    iter_all_vs_all_predictions,
+    predict_all_vs_all_interactions,
     predict_interactions,
     prepare_interactions_dataframe,
 )
@@ -30,6 +32,7 @@ __all__ = [
     # collators
     "CoralDataCollator",
     "DataCollatorForContactPrediction",
+    "DataCollatorForInference",
     "DataCollatorForRBDPrediction",
     # attention interpretability
     "AttentionAnalyzer",
@@ -42,6 +45,7 @@ __all__ = [
     "cohens_d_per_unit",
     # inference
     "predict_interactions",
-    "predict_allVsall_interactions",
+    "iter_all_vs_all_predictions",
+    "predict_all_vs_all_interactions",
     "prepare_interactions_dataframe",
 ]

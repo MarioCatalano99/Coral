@@ -1,16 +1,20 @@
 """Inference utilities for CORAL.
 
-Exposes two entry points:
+Exposes three entry points:
 
 - `predict_interactions`: score a pre-specified list of RNA-protein pairs.
-- `predict_allVsall_interactions`: score every RNA x every protein combination.
+- `iter_all_vs_all_predictions`: stream every RNA x protein combination.
+- `predict_all_vs_all_interactions`: materialize a bounded all-vs-all job.
 
-Both functions expect a model that has been loaded via the recipe in
+The functions expect a model that has been loaded via the recipe in
 `scripts/predict.py` (PeftModel.from_pretrained + merge_and_unload).
 """
 
 import gc
-from typing import Optional, Union
+import logging
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, nullcontext
+from typing import Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -23,107 +27,266 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from .data import CoralDataCollator
+from .data import (
+    PROTEIN_ALPHABET,
+    RNA_ALPHABET,
+    CoralDataCollator,
+    DataCollatorForInference,
+    InferenceRNADataset,
+    tokenize_to_lookup,
+    validate_sequence_frame,
+)
+from .model import CoralPretraining
 
 
-class RNAProteinDataset(Dataset):
-    """All-vs-all RNA x protein pair dataset with eager tokenization."""
+LOGGER = logging.getLogger(__name__)
+OUTPUT_COLUMNS = (
+    "RNA_id",
+    "Protein_id",
+    "logit_margin",
+    "interaction_probability",
+    "prediction",
+)
+RNA_TOKEN_BUCKETS = (128, 256, 512, 768, 1_024)
+MAX_AUTO_BATCH_SIZE = 256
 
-    def __init__(self, rna_df, protein_df, rna_tokenizer, protein_tokenizer):
-        self.rna_df = rna_df.reset_index(drop=True)
-        self.protein_df = protein_df.reset_index(drop=True)
-        self.rna_tokenizer = rna_tokenizer
-        self.protein_tokenizer = protein_tokenizer
 
-        print("Pre-tokenizing RNA sequences...")
-        self.tokenized_rna = self.rna_tokenizer(
-            self.rna_df["sequence"].tolist(),
-            padding="longest",
-            truncation=False,
-            return_tensors="pt",
+def _model_device(model: CoralPretraining) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def _autocast_context(device: torch.device) -> AbstractContextManager:
+    if device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError(f"CUDA device {device} does not support BF16 inference")
+    if device.type in {"cpu", "cuda"}:
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    return nullcontext()
+
+
+def _token_bucket(token_length: int) -> int:
+    for bucket_index, upper_bound in enumerate(RNA_TOKEN_BUCKETS):
+        if token_length <= upper_bound:
+            return bucket_index
+    return len(RNA_TOKEN_BUCKETS)
+
+
+def _bucketed_indices(token_ids: list[list[int]]) -> list[list[int]]:
+    buckets: list[list[int]] = [[] for _ in range(len(RNA_TOKEN_BUCKETS) + 1)]
+    for index, values in enumerate(token_ids):
+        buckets[_token_bucket(len(values))].append(index)
+    for bucket in buckets:
+        bucket.sort(key=lambda index: (len(token_ids[index]), index))
+    return buckets
+
+
+def _move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> tuple[dict, dict]:
+    non_blocking = device.type == "cuda"
+    rna_batch = {
+        "input_ids": batch["rna_input_ids"].to(device, non_blocking=non_blocking),
+        "attention_mask": batch["rna_attention_mask"].to(device, non_blocking=non_blocking),
+    }
+    protein_batch = {
+        "input_ids": batch["protein_input_ids"].to(device, non_blocking=non_blocking),
+        "attention_mask": batch["protein_attention_mask"].to(
+            device, non_blocking=non_blocking
+        ),
+    }
+    return rna_batch, protein_batch
+
+
+def _score_batch(
+    model: CoralPretraining,
+    batch: dict[str, torch.Tensor],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    rna_batch, protein_batch = _move_batch(batch, device)
+    with _autocast_context(device):
+        _, probabilities, logit_margin = model(
+            rna_batch,
+            protein_batch,
+            return_logit_margin=True,
         )
-
-        print("Pre-tokenizing protein sequences...")
-        self.tokenized_proteins = self.protein_tokenizer(
-            self.protein_df["sequence"].tolist(),
-            padding="longest",
-            truncation=False,
-            return_tensors="pt",
-        )
-
-        self.n_rna = len(self.rna_df)
-        self.n_protein = len(self.protein_df)
-        self.total_pairs = self.n_rna * self.n_protein
-
-    def __len__(self):
-        return self.total_pairs
-
-    def __getitem__(self, idx):
-        rna_idx = idx // self.n_protein
-        protein_idx = idx % self.n_protein
-
-        return {
-            "rna_tokens": self.tokenized_rna["input_ids"][rna_idx],
-            "protein_tokens": self.tokenized_proteins["input_ids"][protein_idx],
-            "rna_id": self.rna_df.iloc[rna_idx]["seq id"],
-            "protein_id": self.protein_df.iloc[protein_idx]["seq id"],
-            "rna_attention_mask": self.tokenized_rna["attention_mask"][rna_idx],
-            "protein_attention_mask": self.tokenized_proteins["attention_mask"][protein_idx],
-            "pair_idx": idx,
-        }
+    if not torch.isfinite(probabilities).all() or not torch.isfinite(logit_margin).all():
+        raise FloatingPointError("CORAL produced a non-finite score")
+    probability_sums = probabilities.double().sum(dim=1)
+    if not torch.allclose(probability_sums, torch.ones_like(probability_sums), atol=2e-3):
+        raise FloatingPointError("CORAL interaction probabilities do not sum to one")
+    predictions = (logit_margin > 0).to(torch.long)
+    return predictions, probabilities, logit_margin
 
 
-def predict_allVsall_interactions(
-    model,
-    rna_df,
-    protein_df,
-    rna_tokenizer,
-    protein_tokenizer,
-    batch_size: int = 4,
-    device: str = "cuda",
-):
-    """Score every (RNA, protein) combination from two sequence frames."""
-    dataset = RNAProteinDataset(rna_df, protein_df, rna_tokenizer, protein_tokenizer)
-    print("Dataset size: ", len(dataset))
+def _autotune_batch_size(
+    model: CoralPretraining,
+    collator: DataCollatorForInference,
+    bucket: list[int],
+    device: torch.device,
+) -> int:
+    if device.type != "cuda":
+        LOGGER.info("Using RNA batch size 1 because CUDA autotuning is unavailable")
+        return 1
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    longest_rna = bucket[-1]
+    memory_limit = int(torch.cuda.get_device_properties(device).total_memory * 0.85)
+    safe_batch_size = 0
+    candidate = 1
+    maximum = min(MAX_AUTO_BATCH_SIZE, len(bucket))
+    while candidate <= maximum:
+        batch = collator([{"rna_index": longest_rna}] * candidate)
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+            _score_batch(model, batch, device)
+            peak_memory = torch.cuda.max_memory_allocated(device)
+        except torch.OutOfMemoryError:
+            LOGGER.info("RNA batch size %d exhausted CUDA memory", candidate)
+            torch.cuda.empty_cache()
+            break
+        if peak_memory > memory_limit:
+            break
+        safe_batch_size = candidate
+        candidate *= 2
 
+    if safe_batch_size == 0:
+        raise RuntimeError("RNA batch size 1 exceeds the CUDA memory budget")
+    LOGGER.info(
+        "Selected RNA batch size %d for token length %d",
+        safe_batch_size,
+        len(collator.rna_token_ids[longest_rna]),
+    )
+    return safe_batch_size
+
+
+def iter_all_vs_all_predictions(
+    model: CoralPretraining,
+    rnas: pd.DataFrame,
+    proteins: pd.DataFrame,
+    rna_tokenizer: PreTrainedTokenizerBase,
+    protein_tokenizer: PreTrainedTokenizerBase,
+    *,
+    batch_size: int | Literal["auto"] = "auto",
+    precision: Literal["bf16"] = "bf16",
+    max_rna_nt: int = 6_000,
+    max_protein_aa: int = 1_250,
+    shard_index: int = 0,
+    num_shards: int = 1,
+) -> Iterator[pd.DataFrame]:
+    """Yield bounded all-vs-all CORAL prediction batches."""
+    if precision != "bf16":
+        raise ValueError("only BF16 inference is supported")
+    if num_shards < 1 or not 0 <= shard_index < num_shards:
+        raise ValueError("require num_shards >= 1 and 0 <= shard_index < num_shards")
+    if batch_size != "auto" and (not isinstance(batch_size, int) or batch_size < 1):
+        raise ValueError("batch_size must be a positive integer or 'auto'")
+
+    valid_rnas = validate_sequence_frame(
+        rnas,
+        id_column="RNA_id",
+        sequence_column="RNA_seqs",
+        alphabet=RNA_ALPHABET,
+        max_length=max_rna_nt,
+    )
+    valid_proteins = validate_sequence_frame(
+        proteins,
+        id_column="Protein_id",
+        sequence_column="Prot_seqs",
+        alphabet=PROTEIN_ALPHABET,
+        max_length=max_protein_aa,
+    )
+    valid_rnas = valid_rnas.iloc[shard_index::num_shards].reset_index(drop=True)
+    if valid_rnas.empty:
+        return
+
+    LOGGER.info("Tokenizing %d unique RNA sequences", len(valid_rnas))
+    rna_token_ids = tokenize_to_lookup(valid_rnas["RNA_seqs"].tolist(), rna_tokenizer)
+    LOGGER.info("Tokenizing %d unique protein sequences", len(valid_proteins))
+    protein_token_ids = tokenize_to_lookup(
+        valid_proteins["Prot_seqs"].tolist(), protein_tokenizer
+    )
+    collator = DataCollatorForInference(
+        rna_token_ids,
+        protein_token_ids,
+        rna_tokenizer,
+        protein_tokenizer,
+        pad_to_multiple_of=8,
+    )
+
+    device = _model_device(model)
     model.eval()
-    model.to(device)
-
-    results = []
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Predicting interactions"):
-            rna_batch = {
-                "input_ids": batch["rna_tokens"].to(device),
-                "attention_mask": batch["rna_attention_mask"].to(device),
-            }
-            protein_batch = {
-                "input_ids": batch["protein_tokens"].to(device),
-                "attention_mask": batch["protein_attention_mask"].to(device),
-            }
-
-            predictions, match_probabilities = model(rna_batch, protein_batch)
-
-            for i, prob in enumerate(match_probabilities.cpu().numpy()):
-                results.append(
+    with torch.inference_mode():
+        for bucket in _bucketed_indices(rna_token_ids):
+            if not bucket:
+                continue
+            current_batch_size = (
+                _autotune_batch_size(model, collator, bucket, device)
+                if batch_size == "auto"
+                else batch_size
+            )
+            dataloader = DataLoader(
+                InferenceRNADataset(bucket),
+                batch_size=current_batch_size,
+                shuffle=False,
+                collate_fn=collator,
+                num_workers=0,
+                pin_memory=device.type == "cuda",
+            )
+            for batch in dataloader:
+                predictions, probabilities, logit_margin = _score_batch(model, batch, device)
+                rna_indices = batch["rna_indices"].tolist()
+                protein_indices = batch["protein_indices"].tolist()
+                yield pd.DataFrame(
                     {
-                        "rna_id": batch["rna_id"][i],
-                        "protein_id": batch["protein_id"][i],
-                        "interaction_probability": prob[1].item(),
-                        "prediction": predictions[i].item(),
-                    }
+                        "RNA_id": [valid_rnas.iloc[index]["RNA_id"] for index in rna_indices],
+                        "Protein_id": [
+                            valid_proteins.iloc[index]["Protein_id"]
+                            for index in protein_indices
+                        ],
+                        "logit_margin": logit_margin.float().cpu().numpy(),
+                        "interaction_probability": probabilities[:, 1].float().cpu().numpy(),
+                        "prediction": predictions.to(torch.int8).cpu().numpy(),
+                    },
+                    columns=OUTPUT_COLUMNS,
                 )
 
-            if len(results) % (batch_size * 100) == 0:
-                torch.cuda.empty_cache()
-                gc.collect()
 
-    return pd.DataFrame(results)
+def predict_all_vs_all_interactions(
+    model: CoralPretraining,
+    rnas: pd.DataFrame,
+    proteins: pd.DataFrame,
+    rna_tokenizer: PreTrainedTokenizerBase,
+    protein_tokenizer: PreTrainedTokenizerBase,
+    *,
+    batch_size: int | Literal["auto"] = "auto",
+    precision: Literal["bf16"] = "bf16",
+    max_rna_nt: int = 6_000,
+    max_protein_aa: int = 1_250,
+    shard_index: int = 0,
+    num_shards: int = 1,
+) -> pd.DataFrame:
+    """Materialize all-vs-all predictions for a bounded input."""
+    parts = list(
+        iter_all_vs_all_predictions(
+            model,
+            rnas,
+            proteins,
+            rna_tokenizer,
+            protein_tokenizer,
+            batch_size=batch_size,
+            precision=precision,
+            max_rna_nt=max_rna_nt,
+            max_protein_aa=max_protein_aa,
+            shard_index=shard_index,
+            num_shards=num_shards,
+        )
+    )
+    if not parts:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+    return pd.concat(parts, ignore_index=True)
 
 
 def tokenize_for_inference(
@@ -230,6 +393,8 @@ def predict_interactions(
     missing_cols = [col for col in required_cols if col not in interactions_df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
+    if return_embeddings:
+        raise NotImplementedError("predict_interactions does not expose model embeddings")
 
     has_labels = "labels" in interactions_df.columns
 
@@ -265,13 +430,14 @@ def predict_interactions(
         pin_memory=device == "cuda",
     )
 
-    print(f"Processing {len(dataset)} RNA-protein pairs in {len(dataloader)} batches...")
+    LOGGER.info(
+        "Processing %d RNA-protein pairs in %d batches", len(dataset), len(dataloader)
+    )
 
     model.eval()
     model.to(device)
 
     results = []
-    all_embeddings = [] if return_embeddings else None
     all_rna_to_protein_attentions = {} if save_attentions else None
 
     with torch.no_grad():
@@ -334,9 +500,6 @@ def predict_interactions(
 
     results_df = pd.DataFrame(results)
 
-    if return_embeddings:
-        results_df["embeddings"] = all_embeddings[: len(results_df)]
-
     if has_labels:
         y_true = results_df["true_label"].values
         y_pred = results_df["prediction"].values
@@ -350,9 +513,8 @@ def predict_interactions(
             "roc_auc": roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else np.nan,
         }
 
-        print("\nPrediction Metrics:")
         for metric, value in metrics.items():
-            print(f"{metric}: {value:.4f}")
+            LOGGER.info("%s: %.4f", metric, value)
 
     if save_attentions:
         return results_df, all_rna_to_protein_attentions

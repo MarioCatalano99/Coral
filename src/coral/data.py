@@ -4,18 +4,20 @@ This module consolidates concerns that used to live in separate files:
 
 - `tokenize_function`, `seed_worker`, `specificity_score`, `read_fasta`: general helpers.
 - `CoralDataCollator`: padding + optional MLM masking for training and inference.
+- `DataCollatorForInference`: lookup-based padding for large all-vs-all inference.
 - `DataCollatorForContactPrediction`: padding + structural-contact label construction
   for the contact interpretability analysis.
 - `DataCollatorForRBDPrediction`: padding + a 1D per-residue RNA-binding-domain
   mask for the RBD interpretability analysis.
 
-All three collators emit the same four core keys — `{rna,protein}_input_ids` and
+All four collators emit the same four core keys — `{rna,protein}_input_ids` and
 `{rna,protein}_attention_mask` — plus whatever labels their analysis needs, so a
 caller can swap one for another without touching the training loop.
 """
 
 import random
-from typing import Dict, List, Optional, Tuple
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,10 @@ import torch
 from sklearn.metrics import confusion_matrix
 
 from .rbd import intervals_to_residue_mask
+
+
+RNA_ALPHABET = frozenset("ACGT")
+PROTEIN_ALPHABET = frozenset("ACDEFGHIKLMNPQRSTVWY")
 
 
 # --- General helpers ---------------------------------------------------------
@@ -75,6 +81,155 @@ def specificity_score(y_true, y_pred) -> float:
     if (tn + fp) == 0:
         return 0.0
     return tn / (tn + fp)
+
+
+# --- Large-scale inference --------------------------------------------------
+
+def validate_sequence_frame(
+    frame: pd.DataFrame,
+    *,
+    id_column: str,
+    sequence_column: str,
+    alphabet: frozenset[str],
+    max_length: int,
+) -> pd.DataFrame:
+    """Validate and return a position-indexed inference manifest."""
+    missing = [column for column in (id_column, sequence_column) if column not in frame]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+    if max_length < 1:
+        raise ValueError("maximum sequence length must be positive")
+
+    result = frame.loc[:, [id_column, sequence_column]].reset_index(drop=True).copy()
+    if result.empty:
+        raise ValueError(f"{id_column}/{sequence_column} manifest must not be empty")
+    for row_index, (identifier, sequence) in enumerate(
+        result.itertuples(index=False, name=None)
+    ):
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise ValueError(f"{id_column} at row {row_index} must be a nonempty string")
+        if identifier != identifier.strip():
+            raise ValueError(f"{id_column} at row {row_index} has surrounding whitespace")
+        if not isinstance(sequence, str) or not sequence:
+            raise ValueError(f"{sequence_column} at row {row_index} must be a nonempty string")
+        if len(sequence) > max_length:
+            raise ValueError(
+                f"{sequence_column} at row {row_index} has length {len(sequence)}, "
+                f"above the limit {max_length}"
+            )
+        invalid = set(sequence) - alphabet
+        if invalid:
+            symbols = "".join(sorted(invalid))
+            raise ValueError(
+                f"{sequence_column} at row {row_index} contains invalid symbols: {symbols}"
+            )
+
+    for column in (id_column, sequence_column):
+        duplicate = result[column].duplicated(keep=False)
+        if duplicate.any():
+            value = result.loc[duplicate, column].iloc[0]
+            raise ValueError(f"{column} values must be unique; duplicate: {value}")
+    return result
+
+
+def tokenize_to_lookup(
+    sequences: Sequence[str],
+    tokenizer,
+    *,
+    chunk_size: int = 1_024,
+) -> list[list[int]]:
+    """Tokenize unique sequences once without padding or truncation."""
+    if chunk_size < 1:
+        raise ValueError("tokenization chunk size must be positive")
+
+    token_ids: list[list[int]] = []
+    for start in range(0, len(sequences), chunk_size):
+        encoded = tokenizer(
+            list(sequences[start : start + chunk_size]),
+            padding=False,
+            truncation=False,
+            return_attention_mask=False,
+            return_token_type_ids=False,
+        )
+        input_ids = encoded["input_ids"]
+        if len(input_ids) != min(chunk_size, len(sequences) - start):
+            raise RuntimeError("tokenizer returned an unexpected number of sequences")
+        token_ids.extend([list(map(int, values)) for values in input_ids])
+
+    if len(token_ids) != len(sequences) or any(not values for values in token_ids):
+        raise RuntimeError("tokenization produced an incomplete or empty lookup table")
+    return token_ids
+
+
+class InferenceRNADataset(torch.utils.data.Dataset):
+    """Return RNA lookup indices in a deterministic caller-provided order."""
+
+    def __init__(self, rna_order: Sequence[int]):
+        self.rna_order = list(rna_order)
+
+    def __len__(self) -> int:
+        return len(self.rna_order)
+
+    def __getitem__(self, index: int) -> dict[str, int]:
+        return {"rna_index": self.rna_order[index]}
+
+
+class DataCollatorForInference:
+    """Expand RNA indices across proteins and dynamically pad token lookups."""
+
+    def __init__(
+        self,
+        rna_token_ids: Sequence[Sequence[int]],
+        protein_token_ids: Sequence[Sequence[int]],
+        rna_tokenizer,
+        protein_tokenizer,
+        *,
+        pad_to_multiple_of: int | None = 8,
+    ) -> None:
+        if not rna_token_ids:
+            raise ValueError("RNA token lookup must not be empty")
+        if not protein_token_ids:
+            raise ValueError("protein token lookup must not be empty")
+        self.rna_token_ids = rna_token_ids
+        self.protein_token_ids = protein_token_ids
+        self.rna_tokenizer = rna_tokenizer
+        self.protein_tokenizer = protein_tokenizer
+        self.pad_to_multiple_of = pad_to_multiple_of
+
+    def _pad(self, token_ids: Sequence[Sequence[int]], tokenizer) -> dict[str, torch.Tensor]:
+        features = [{"input_ids": values} for values in token_ids]
+        return tokenizer.pad(
+            features,
+            padding=True,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        rna_indices = [int(feature["rna_index"]) for feature in features]
+        protein_count = len(self.protein_token_ids)
+        expanded_rna_indices = [
+            rna_index for rna_index in rna_indices for _ in range(protein_count)
+        ]
+        protein_indices = list(range(protein_count)) * len(rna_indices)
+
+        batch_rna = self._pad(
+            [self.rna_token_ids[index] for index in expanded_rna_indices],
+            self.rna_tokenizer,
+        )
+        batch_protein = self._pad(
+            [self.protein_token_ids[index] for index in protein_indices],
+            self.protein_tokenizer,
+        )
+        return {
+            "rna_input_ids": batch_rna["input_ids"],
+            "rna_attention_mask": batch_rna["attention_mask"],
+            "protein_input_ids": batch_protein["input_ids"],
+            "protein_attention_mask": batch_protein["attention_mask"],
+            "rna_indices": torch.tensor(expanded_rna_indices, dtype=torch.long),
+            "protein_indices": torch.tensor(protein_indices, dtype=torch.long),
+        }
 
 
 # --- Standard collator (training + inference) --------------------------------

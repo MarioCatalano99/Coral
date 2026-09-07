@@ -616,7 +616,8 @@ class CoralPretraining(PreTrainedModel):
 
     def forward(self, rna_batch, protein_batch, matched_labels=None, soft_matched_labels=None,
                 task_mask_lm=True, task_matched=True, output_attentions=False,
-                mlm_scaling_factor=1):
+                mlm_scaling_factor=1, return_logit_margin=False):
+        """Run CORAL, optionally appending the class-1 minus class-0 logit margin."""
 
         bert_outputs = self.bert(rna_batch, protein_batch, output_attentions=output_attentions)
 
@@ -684,6 +685,10 @@ class CoralPretraining(PreTrainedModel):
             outputs = (total_loss, torch.stack(losses), predictions, match_probabilities)
         else:
             outputs = predictions, match_probabilities
+
+        if return_logit_margin:
+            logit_margin = cross_relationship_score[:, 1] - cross_relationship_score[:, 0]
+            outputs = outputs + (logit_margin,)
 
         if output_attentions:
             outputs = outputs + (cross_attentions, self_attentions)

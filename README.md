@@ -72,9 +72,9 @@ LoRA adapters into the encoders, and prints per-pair interaction probabilities.
 Coral/
 ├── src/coral/               Installable Python package
 │   ├── model.py             CoralConfig / Coral / CoralPretraining
-│   ├── data.py              Tokenization + padding, contact and RBD collators
+│   ├── data.py              Tokenization + training, analysis, inference collators
 │   ├── attention.py         AttentionAnalyzer for cross-attention extraction
-│   ├── inference.py         predict_interactions / predict_allVsall_interactions
+│   ├── inference.py         Pairwise and streaming all-vs-all inference
 │   ├── paths.py             Single source of truth for every filesystem path
 │   ├── stats.py             Hierarchical bootstrap, per-unit Cohen's d
 │   ├── head_selection.py    Friedman + Wilcoxon best-vs-rest with BH FDR
@@ -82,6 +82,7 @@ Coral/
 ├── scripts/                 General entry points
 │   ├── train.py             Fine-tune from scratch on a single fold
 │   ├── predict.py           Score a CSV of RNA-protein pairs
+│   ├── predict_all_vs_all.py  Stream manifest cross-products to Parquet parts
 │   ├── download_weights.sh  Fetch the trained checkpoint from Zenodo
 │   ├── download_data.sh     Fetch the benchmark splits from Zenodo
 │   └── download_dnabert_weights.sh
@@ -160,6 +161,19 @@ python scripts/predict.py \
   --input-csv examples/sample_pairs.csv \
   --output predictions.csv
 ```
+
+For a large all-vs-all job, supply deduplicated sequence manifests and stream bounded
+Parquet parts. Existing compatible parts are validated and resumed automatically:
+
+```bash
+torchrun --standalone --nproc_per_node=2 scripts/predict_all_vs_all.py \
+  --rnas data/TCGA/luad_rna_sequences.parquet \
+  --proteins data/TCGA/luad_proteins.tsv \
+  --output-dir data/TCGA/luad_predictions
+```
+
+Interactive runs show one progress bar per rank, measured in completed RNAs. Progress
+resumes from validated parts; routine part writes do not add log lines above the bars.
 
 ### (b) Reproduce Table 2 from the trained model + released splits
 
