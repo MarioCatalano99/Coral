@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 import torch
@@ -12,7 +13,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from coral.inference import predict_all_vs_all_interactions
+from coral.inference import iter_all_vs_all_predictions, predict_all_vs_all_interactions
 from coral.data import DataCollatorForInference, validate_sequence_frame
 from coral.model import CoralPretraining
 from scripts.predict_all_vs_all import (
@@ -34,17 +35,22 @@ class FakeTokenizer:
         *,
         padding: bool,
         truncation: bool,
-        return_attention_mask: bool,
-        return_token_type_ids: bool,
-    ) -> dict[str, list[list[int]]]:
-        del padding, truncation, return_attention_mask, return_token_type_ids
+        return_attention_mask: bool = True,
+        return_token_type_ids: bool = False,
+        pad_to_multiple_of: int | None = None,
+        return_tensors: str | None = None,
+    ) -> dict[str, list[list[int]]] | dict[str, torch.Tensor]:
+        del truncation, return_token_type_ids
         self.calls.append(sequences)
-        return {
-            "input_ids": [
-                [1, *[ord(symbol) % 23 + 3 for symbol in sequence], 2]
-                for sequence in sequences
-            ]
-        }
+        ids = [[1, *[ord(symbol) % 23 + 3 for symbol in sequence], 2]
+               for sequence in sequences]
+        if return_tensors == "pt":
+            return self.pad(
+                [{"input_ids": values} for values in ids], padding=padding,
+                pad_to_multiple_of=pad_to_multiple_of,
+                return_attention_mask=return_attention_mask, return_tensors=return_tensors,
+            )
+        return {"input_ids": ids}
 
     def pad(
         self,
@@ -212,6 +218,45 @@ class LargeInferenceTests(unittest.TestCase):
         self.assertTrue(
             (result["prediction"] == (result["logit_margin"] > 0).astype("int8")).all()
         )
+
+    def test_preflight_reuses_lookups_and_checks_each_length_bucket(self) -> None:
+        rnas = pd.concat([self.rnas, pd.DataFrame(
+            {"RNA_id": ["rna-long"], "RNA_seqs": ["A" * 130]}
+        )], ignore_index=True)
+        rna_tokenizer, protein_tokenizer = FakeTokenizer(), FakeTokenizer()
+        model = FakeCoral()
+        diagnostics = {}
+        result = pd.concat(list(iter_all_vs_all_predictions(
+            model, rnas, self.proteins, rna_tokenizer, protein_tokenizer,
+            batch_size=1, preflight=True, diagnostics=diagnostics,
+        )), ignore_index=True)
+        expected = predict_all_vs_all_interactions(
+            model, rnas, self.proteins, FakeTokenizer(), FakeTokenizer(), batch_size=1,
+        )
+        pd.testing.assert_frame_equal(result, expected)
+        # Only the representative direct checks follow the single lookup pass.
+        self.assertEqual(rna_tokenizer.calls, [
+            rnas.RNA_seqs.tolist(), ["AAAAC"] * 2, ["A" * 130] * 2,
+        ])
+        self.assertEqual(protein_tokenizer.calls, [self.proteins.Prot_seqs.tolist()] * 3)
+        checks = diagnostics["preflight"]["checks"]
+        self.assertEqual([check["rna_tokens"] for check in checks], [7, 132])
+        self.assertTrue(all(check["max_padding_margin_error"] == 0 for check in checks))
+
+    def test_preflight_numerical_failure_prevents_first_prediction_batch(self) -> None:
+        for values, message in (
+            ([0., 1., 0.], "repeated float32 scores differ"),
+            ([0., 0., 1.], "padding-dependent float32 margin"),
+        ):
+            with self.subTest(message=message):
+                scores = [(None, None, torch.full((2,), value)) for value in values]
+                with patch("coral.inference._score_batch", side_effect=scores):
+                    iterator = iter_all_vs_all_predictions(
+                        FakeCoral(), self.rnas, self.proteins,
+                        FakeTokenizer(), FakeTokenizer(), batch_size=1, preflight=True,
+                    )
+                    with self.assertRaisesRegex(ValueError, message):
+                        next(iterator)
 
     def test_manifest_validation_rejects_duplicate_sequences(self) -> None:
         duplicated = pd.DataFrame(

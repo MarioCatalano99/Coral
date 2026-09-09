@@ -2,11 +2,14 @@
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
+import platform
 import random
 import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -32,16 +35,10 @@ from coral.data import (
 )
 from coral.inference import iter_all_vs_all_predictions
 from coral.model import CoralConfig, CoralPretraining
+from coral.prediction_io import sha256_file, validate_scores
 
 
 LOGGER = logging.getLogger("coral.all_vs_all")
-OUTPUT_COLUMNS = [
-    "RNA_id",
-    "Protein_id",
-    "logit_margin",
-    "interaction_probability",
-    "prediction",
-]
 
 
 def parse_batch_size(value: str) -> int | str:
@@ -88,15 +85,6 @@ def read_table(path: Path) -> pd.DataFrame:
     raise ValueError(f"unsupported manifest format: {path}")
 
 
-def sha256_file(path: Path) -> str:
-    """Return the SHA-256 digest of a file."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def checkpoint_hash(path: Path) -> str:
     """Hash checkpoint filenames and contents deterministically."""
     if path.is_file():
@@ -104,7 +92,7 @@ def checkpoint_hash(path: Path) -> str:
     if not path.is_dir():
         raise FileNotFoundError(path)
     digest = hashlib.sha256()
-    files = sorted(item for item in path.rglob("*") if item.is_file())
+    files = sorted(item for item in path.rglob("*") if item.is_file() and "__pycache__" not in item.parts and not item.name.startswith("."))
     if not files:
         raise ValueError(f"checkpoint directory is empty: {path}")
     for file_path in files:
@@ -138,6 +126,7 @@ def build_run_config(
         ROOT / "src/coral/inference.py",
         ROOT / "src/coral/data.py",
         ROOT / "src/coral/model.py",
+        ROOT / "src/coral/prediction_io.py",
         Path(__file__).resolve(),
     ]
     config: dict[str, Any] = {
@@ -150,7 +139,8 @@ def build_run_config(
         "rna_encoder": args.rna_encoder,
         "protein_encoder": args.protein_encoder,
         "batch_size": args.batch_size,
-        "precision": "bf16",
+        "precision": "float32",
+        "encoder_sha256": {"rna": checkpoint_hash(Path(args.rna_encoder)), "protein": checkpoint_hash(Path(args.protein_encoder))},
         "max_rna_nt": args.max_rna_nt,
         "max_protein_aa": args.max_protein_aa,
         "seed": args.seed,
@@ -187,12 +177,14 @@ def read_completed_rnas(
     completed: set[str] = set()
     seen_pairs: set[tuple[str, str]] = set()
     for path in part_paths(output_dir, rank):
+        receipt = path.with_suffix(".sha256")
+        if not receipt.exists() or receipt.read_text().strip() != sha256_file(path):
+            raise ValueError(f"prediction part hash mismatch or missing receipt: {path}")
         metadata = pq.read_metadata(path).metadata or {}
         if metadata.get(b"run_hash", b"").decode() != run_hash:
             raise ValueError(f"run hash mismatch in existing part: {path}")
         frame = pd.read_parquet(path)
-        if list(frame.columns) != OUTPUT_COLUMNS:
-            raise ValueError(f"prediction schema mismatch in existing part: {path}")
+        validate_scores(frame)
         for rna_id, group in frame.groupby("RNA_id", sort=False):
             observed = set(group["Protein_id"])
             if observed != protein_ids or len(group) != len(protein_ids):
@@ -215,12 +207,17 @@ def write_part_atomic(
     rank: int,
 ) -> None:
     """Write one Parquet part through an atomic rename."""
+    validate_scores(frame)
     table = pa.Table.from_pandas(frame, preserve_index=False)
     metadata = dict(table.schema.metadata or {})
     metadata.update({b"run_hash": run_hash.encode(), b"rank": str(rank).encode()})
     temporary = path.with_suffix(path.suffix + ".tmp")
     pq.write_table(table.replace_schema_metadata(metadata), temporary, compression="zstd")
     os.replace(temporary, path)
+    receipt = path.with_suffix(".sha256")
+    temporary_receipt = receipt.with_suffix(".sha256.tmp")
+    temporary_receipt.write_text(sha256_file(path) + "\n")
+    os.replace(temporary_receipt, receipt)
 
 
 def write_rank_manifest(
@@ -236,6 +233,7 @@ def write_rank_manifest(
         raise RuntimeError(f"rank {rank} wrote {row_count} rows; expected {expected_rows}")
     manifest = {
         **config,
+        "status": "complete",
         "expected_rows": expected_rows,
         "parts": [
             {
@@ -266,7 +264,7 @@ def load_model_and_tokenizers(
     LOGGER.info("Loading base encoders on rank-local device %s", device)
     base_model = CoralPretraining(config=config)
     peft_model = PeftModel.from_pretrained(base_model, args.weights)
-    model = peft_model.merge_and_unload().to(device).eval()
+    model = peft_model.merge_and_unload().float().to(device).eval()
     return model, rna_tokenizer, protein_tokenizer
 
 
@@ -277,6 +275,16 @@ def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+    # Resolve cached Hub assets once; filenames and weight bytes enter the run hash.
+    if not Path(args.protein_encoder).is_dir():
+        from huggingface_hub import snapshot_download
+        args.protein_encoder = snapshot_download(args.protein_encoder, local_files_only=True)
+    args.rna_encoder = str(Path(args.rna_encoder).resolve())
+    args.protein_encoder = str(Path(args.protein_encoder).resolve())
+    started = time.monotonic()
 
     rank, world_size, _, device = execution_context()
     rnas = validate_sequence_frame(
@@ -302,6 +310,8 @@ def main() -> None:
     completed = read_completed_rnas(
         args.output_dir, rank, config["run_hash"], protein_ids
     )
+    if not completed.issubset(set(rank_rnas.RNA_id)):
+        raise ValueError("resumed RNA IDs do not belong to this rank")
     remaining = rank_rnas.loc[~rank_rnas["RNA_id"].isin(completed)].reset_index(drop=True)
     LOGGER.info(
         "Rank %d/%d has %d completed and %d remaining RNAs",
@@ -311,6 +321,7 @@ def main() -> None:
         len(remaining),
     )
 
+    diagnostics = {}
     if not remaining.empty:
         model, rna_tokenizer, protein_tokenizer = load_model_and_tokenizers(args, device)
         next_part = next_part_index(args.output_dir, rank)
@@ -321,6 +332,8 @@ def main() -> None:
             rna_tokenizer,
             protein_tokenizer,
             batch_size=args.batch_size,
+            diagnostics=diagnostics,
+            preflight=True,
             max_rna_nt=args.max_rna_nt,
             max_protein_aa=args.max_protein_aa,
         )
@@ -348,13 +361,18 @@ def main() -> None:
                 )
                 write_part_atomic(frame, path, config["run_hash"], rank)
                 progress.update(completed_in_part)
-                LOGGER.debug("Wrote %s (%d rows)", path.name, len(frame))
+                if offset % 100 == 0:
+                    LOGGER.info("Rank %d wrote %s (%d rows)", rank, path.name, len(frame))
 
     final_completed = read_completed_rnas(
         args.output_dir, rank, config["run_hash"], protein_ids
     )
     if final_completed != set(rank_rnas["RNA_id"]):
         raise RuntimeError(f"rank {rank} output has incomplete or unexpected RNA coverage")
+    config["runtime"] = {**diagnostics, "elapsed_seconds": time.monotonic() - started,
+        "python": platform.python_version(), "torch": torch.__version__,
+        "software": {name: importlib.metadata.version(name) for name in ("transformers", "tokenizers", "peft", "numpy", "pandas", "pyarrow")},
+        "cuda": torch.version.cuda}
     write_rank_manifest(args.output_dir, rank, config, expected_rows)
     LOGGER.info("Rank %d complete: %d prediction rows", rank, expected_rows)
 

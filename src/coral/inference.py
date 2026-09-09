@@ -8,13 +8,17 @@ Exposes three entry points:
 
 The functions expect a model that has been loaded via the recipe in
 `scripts/predict.py` (PeftModel.from_pretrained + merge_and_unload).
+
+Preflight checks stay beside the scoring helpers and reuse prepared tokens.
+This intentionally exceeds the 400-line target to keep inference setup local.
 """
 
 import gc
 import logging
+import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, nullcontext
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -41,16 +45,10 @@ from .data import (
     validate_sequence_frame,
 )
 from .model import CoralPretraining
+from .prediction_io import COLUMNS as OUTPUT_COLUMNS
 
 
 LOGGER = logging.getLogger(__name__)
-OUTPUT_COLUMNS = (
-    "RNA_id",
-    "Protein_id",
-    "logit_margin",
-    "interaction_probability",
-    "prediction",
-)
 RNA_TOKEN_BUCKETS = (128, 256, 512, 768, 1_024)
 MAX_AUTO_BATCH_SIZE = 256
 
@@ -63,10 +61,8 @@ def _model_device(model: CoralPretraining) -> torch.device:
 
 
 def _autocast_context(device: torch.device) -> AbstractContextManager:
-    if device.type == "cuda" and not torch.cuda.is_bf16_supported():
-        raise RuntimeError(f"CUDA device {device} does not support BF16 inference")
     if device.type in {"cpu", "cuda"}:
-        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+        return torch.autocast(device_type=device.type, enabled=False)
     return nullcontext()
 
 
@@ -113,13 +109,68 @@ def _score_batch(
             protein_batch,
             return_logit_margin=True,
         )
+    if probabilities.dtype != torch.float32 or logit_margin.dtype != torch.float32:
+        raise TypeError("all-vs-all inference requires float32 outputs")
     if not torch.isfinite(probabilities).all() or not torch.isfinite(logit_margin).all():
         raise FloatingPointError("CORAL produced a non-finite score")
     probability_sums = probabilities.double().sum(dim=1)
-    if not torch.allclose(probability_sums, torch.ones_like(probability_sums), atol=2e-3):
+    if not torch.allclose(probability_sums, torch.ones_like(probability_sums), atol=2e-6):
         raise FloatingPointError("CORAL interaction probabilities do not sum to one")
     predictions = (logit_margin > 0).to(torch.long)
     return predictions, probabilities, logit_margin
+
+
+def _check_float32(
+    model: CoralPretraining,
+    rnas: pd.DataFrame,
+    proteins: pd.DataFrame,
+    collator: DataCollatorForInference,
+) -> dict[str, Any]:
+    """Check tokenization, repeatability and padding using the inference lookups."""
+    device = _model_device(model)
+    if any(p.dtype != torch.float32 for p in model.parameters() if p.is_floating_point()):
+        raise TypeError("model contains parameters outside float32")
+    unpadded = DataCollatorForInference(
+        collator.rna_token_ids, collator.protein_token_ids,
+        collator.rna_tokenizer, collator.protein_tokenizer, pad_to_multiple_of=None,
+    )
+    checks = []
+    start = time.monotonic()
+    with torch.inference_mode():
+        for bucket in _bucketed_indices(collator.rna_token_ids):
+            if not bucket:
+                continue
+            index = bucket[-1]
+            features = [{"rna_index": index}]
+            batch = collator(features)
+            direct_rna = collator.rna_tokenizer(
+                [rnas.iloc[index].RNA_seqs] * len(proteins), padding=True,
+                truncation=False, pad_to_multiple_of=8, return_tensors="pt",
+            )
+            direct_protein = collator.protein_tokenizer(
+                proteins.Prot_seqs.tolist(), padding=True,
+                truncation=False, pad_to_multiple_of=8, return_tensors="pt",
+            )
+            for prefix, direct in (("rna", direct_rna), ("protein", direct_protein)):
+                for key in ("input_ids", "attention_mask"):
+                    if not torch.equal(batch[f"{prefix}_{key}"], direct[key]):
+                        raise ValueError("lookup and direct tokenization disagree")
+            first = _score_batch(model, batch, device)[2]
+            repeat = _score_batch(model, batch, device)[2]
+            other = _score_batch(model, unpadded(features), device)[2]
+            if not torch.equal(first, repeat):
+                raise ValueError("repeated float32 scores differ")
+            error = float((first - other).abs().max())
+            if not torch.allclose(first, other, atol=5e-4, rtol=1e-5):
+                raise ValueError(f"padding-dependent float32 margin: {error}")
+            checks.append({"rna_tokens": len(collator.rna_token_ids[index]),
+                           "max_padding_margin_error": error})
+    return {
+        "precision": "float32", "tf32": False, "checks": checks,
+        "elapsed_seconds": time.monotonic() - start, "device": str(device),
+        "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
+    }
 
 
 def _autotune_batch_size(
@@ -170,15 +221,21 @@ def iter_all_vs_all_predictions(
     protein_tokenizer: PreTrainedTokenizerBase,
     *,
     batch_size: int | Literal["auto"] = "auto",
-    precision: Literal["bf16"] = "bf16",
+    precision: Literal["float32"] = "float32",
     max_rna_nt: int = 6_000,
     max_protein_aa: int = 1_250,
     shard_index: int = 0,
     num_shards: int = 1,
+    diagnostics: dict | None = None,
+    preflight: bool = False,
 ) -> Iterator[pd.DataFrame]:
-    """Yield bounded all-vs-all CORAL prediction batches."""
-    if precision != "bf16":
-        raise ValueError("only BF16 inference is supported")
+    """Yield bounded prediction batches, optionally checking numerics before scoring.
+
+    Preflight reuses this shard's token lookups and records its results in
+    diagnostics when supplied. A failed check raises before any batch is yielded.
+    """
+    if precision != "float32":
+        raise ValueError("only float32 inference is supported")
     if num_shards < 1 or not 0 <= shard_index < num_shards:
         raise ValueError("require num_shards >= 1 and 0 <= shard_index < num_shards")
     if batch_size != "auto" and (not isinstance(batch_size, int) or batch_size < 1):
@@ -217,7 +274,15 @@ def iter_all_vs_all_predictions(
     )
 
     device = _model_device(model)
-    model.eval()
+    model.float().eval()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+    if preflight:
+        checks = _check_float32(model, valid_rnas, valid_proteins, collator)
+        if diagnostics is not None:
+            diagnostics["preflight"] = checks
+        LOGGER.info("Float32 preflight: %s", checks)
     with torch.inference_mode():
         for bucket in _bucketed_indices(rna_token_ids):
             if not bucket:
@@ -227,6 +292,12 @@ def iter_all_vs_all_predictions(
                 if batch_size == "auto"
                 else batch_size
             )
+            if diagnostics is not None:
+                diagnostics.setdefault("buckets", []).append({
+                    "max_tokens": len(rna_token_ids[bucket[-1]]),
+                    "rna_count": len(bucket), "rna_batch_size": current_batch_size,
+                    "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
+                })
             dataloader = DataLoader(
                 InferenceRNADataset(bucket),
                 batch_size=current_batch_size,
@@ -262,7 +333,7 @@ def predict_all_vs_all_interactions(
     protein_tokenizer: PreTrainedTokenizerBase,
     *,
     batch_size: int | Literal["auto"] = "auto",
-    precision: Literal["bf16"] = "bf16",
+    precision: Literal["float32"] = "float32",
     max_rna_nt: int = 6_000,
     max_protein_aa: int = 1_250,
     shard_index: int = 0,

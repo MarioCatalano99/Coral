@@ -26,7 +26,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(os.environ.get("CORAL_REPO_ROOT", Path(__file__).resolve().parents[3]))
 TCGA_DIR = REPO_ROOT / "data" / "TCGA"
 SOURCE_DIR = TCGA_DIR / "luad_sources"
 
@@ -70,14 +70,16 @@ PROTEINS = {
     "IGF2BP3": ("O00425", "O00425-1", 579),
     "LIN28B": ("Q6ZN17", "Q6ZN17-1", 250),
 }
+PINNED_PROTEIN_SHA256 = {
+    "Q9NZI8": "e9dfe3add14d17a938d9a42fa9356ddc680181c6d3029b216f9a4577c92b8cb4",
+    "O00425": "f4773c1f8040890d506a167b70759e2a084bbfa1c1606db2ba105c4878e4c798",
+    "Q6ZN17": "5ec90b937f38e6859645039f0d3418f863a952bd7e8a2c160ba5a63bc24b36ad",
+}
 UNIPROT_URL_TEMPLATE = "https://rest.uniprot.org/uniprotkb/{accession}.fasta"
 UNPAIRED_NORMAL = "TCGA-44-6144-11"
 
 PRIMARY_TPM_CUTOFF = 1.0
 SENSITIVITY_TPM_CUTOFF = 0.5
-TUMOR_PREVALENCE_MINIMUM = 52
-NORMAL_PREVALENCE_MINIMUM = 6
-MAX_RNA_NT = 6_000
 
 EXPECTED = {
     "tumor_expression_sha256": (
@@ -90,12 +92,6 @@ EXPECTED = {
     "at_most_6000_nt": 193_459,
     "invalid_alphabet_within_limit": 3,
     "over_6000_nt": 5_160,
-    "primary_transcripts": 63_965,
-    "primary_unique_sequences": 63_881,
-    "primary_genes": 19_485,
-    "sensitivity_transcripts": 85_965,
-    "sensitivity_unique_sequences": 85_851,
-    "sensitivity_genes": 22_832,
 }
 PINNED_SOURCE_SHA256 = {
     NORMAL_EXPRESSION: "6ca2248abdc92c9ba6702e2a0ba63b02534634fcf44dd001bd37c4e28fc71b78",
@@ -271,7 +267,8 @@ def expression_summaries(
 
 
 def write_expression_parquet(
-    transcript_ids: list[str], sample_ids: list[str], matrix: np.memmap, batch_rows: int
+    transcript_ids: list[str], sample_ids: list[str], matrix: np.memmap, batch_rows: int,
+    destination: Path = EXPRESSION_PARQUET,
 ) -> None:
     """Atomically write the transcript-row logged-expression Parquet."""
     schema = pa.schema(
@@ -283,7 +280,7 @@ def write_expression_parquet(
             b"tpm_transform": b"max(2**logged_value - 0.001, 0)",
         },
     )
-    temporary = EXPRESSION_PARQUET.with_name(f".{EXPRESSION_PARQUET.name}.tmp")
+    temporary = destination.with_name(f".{destination.name}.tmp")
     with pq.ParquetWriter(temporary, schema, compression="zstd", use_dictionary=["transcript_id"]) as writer:
         for start in range(0, len(transcript_ids), batch_rows):
             stop = min(start + batch_rows, len(transcript_ids))
@@ -291,7 +288,7 @@ def write_expression_parquet(
             arrays = [pa.array(transcript_ids[start:stop], type=pa.string())]
             arrays.extend(pa.array(block[:, index]) for index in range(len(sample_ids)))
             writer.write_table(pa.Table.from_arrays(arrays, schema=schema))
-    os.replace(temporary, EXPRESSION_PARQUET)
+    os.replace(temporary, destination)
 
 
 def write_parquet_atomic(table: pa.Table, path: Path, row_group_size: int = 4_096) -> None:
@@ -340,6 +337,10 @@ def build_sample_rows(tumors: list[str], normals: list[str]) -> list[dict[str, A
         raise ValueError("tumor matrix contains a non-primary sample")
     if any(sample.split("-")[3][:2] != "11" for sample in normals):
         raise ValueError("normal matrix contains a non-solid-tissue-normal sample")
+    for cohort in (tumors, normals):
+        patients = [participant_id(sample) for sample in cohort]
+        if len(patients) != len(set(patients)):
+            raise ValueError("more than one sample per patient and cohort")
     matched = {participant_id(sample) for sample in tumors} & {
         participant_id(sample) for sample in normals
     }
@@ -357,38 +358,3 @@ def build_sample_rows(tumors: list[str], normals: list[str]) -> list[dict[str, A
             }
         )
     return rows
-
-
-def validate_outputs(sample_ids: list[str]) -> None:
-    """Reopen generated tables and enforce downstream schemas and dimensions."""
-    expression = pq.ParquetFile(EXPRESSION_PARQUET)
-    if expression.metadata.num_rows != EXPECTED["transcripts"]:
-        raise ValueError("generated expression row count mismatch")
-    if expression.schema_arrow.names != ["transcript_id", *sample_ids]:
-        raise ValueError("generated expression axes mismatch")
-    if pq.ParquetFile(TRANSCRIPT_MANIFEST).metadata.num_rows != EXPECTED["transcripts"]:
-        raise ValueError("generated transcript manifest row count mismatch")
-    rnas = pq.read_table(RNA_MANIFEST).to_pydict()
-    if list(rnas)[:2] != ["RNA_id", "RNA_seqs"]:
-        raise ValueError("RNA manifest lacks canonical Step-4 leading columns")
-    if len(rnas["RNA_id"]) != EXPECTED["sensitivity_unique_sequences"]:
-        raise ValueError("RNA inference universe row count mismatch")
-    if len(set(rnas["RNA_id"])) != len(rnas["RNA_id"]):
-        raise ValueError("RNA inference IDs are not unique")
-    if len(set(rnas["RNA_seqs"])) != len(rnas["RNA_seqs"]):
-        raise ValueError("RNA inference sequences are not unique")
-    if rnas["RNA_id"] != sorted(rnas["RNA_id"]):
-        raise ValueError("RNA inference rows are not deterministically ordered")
-    for rna_id, sequence, digest, length in zip(
-        rnas["RNA_id"], rnas["RNA_seqs"], rnas["rna_sequence_sha256"],
-        rnas["rna_nt_length"], strict=True
-    ):
-        valid = (rna_id == f"rna_{digest}" and digest == sha256_text(sequence)
-                 and length == len(sequence) and 0 < length <= MAX_RNA_NT
-                 and set(sequence) <= set("ACGT"))
-        if not valid:
-            raise ValueError(f"invalid canonical RNA inference row: {rna_id}")
-    assert_count("primary RNA inference rows", sum(rnas["primary_eligible"]), "primary_unique_sequences")
-    proteins = read_tsv(PROTEIN_MANIFEST)
-    if [row["Protein_id"] for row in proteins] != [value[1] for value in PROTEINS.values()]:
-        raise ValueError("protein inference manifest order or IDs differ")

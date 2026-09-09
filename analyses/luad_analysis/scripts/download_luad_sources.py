@@ -57,6 +57,7 @@ from _luad_data import (
     NORMAL_EXPRESSION,
     NORMAL_SOURCE_MANIFEST,
     PINNED_SOURCE_SHA256,
+    PINNED_PROTEIN_SHA256,
     PROTEINS,
     SOURCE_DIR,
     TUMOR_EXPRESSION,
@@ -193,7 +194,8 @@ def normal_cache_is_valid(transcript_ids: list[str], samples: list[str]) -> bool
         return False
     try:
         metadata = json.loads(NORMAL_SOURCE_MANIFEST.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as error:
+        LOGGER.warning("Invalid normal source sidecar: %s", error)
         return False
     return bool(
         metadata.get("samples") == samples
@@ -217,8 +219,12 @@ def write_normal_expression(
                 for index, sample in enumerate(samples):
                     serialized = (format(float(value), ".9g") for value in values[:, index])
                     handle.write(sample + "\t" + "\t".join(serialized) + "\n")
+    digest = sha256_file(temporary)
+    if digest != PINNED_SOURCE_SHA256[NORMAL_EXPRESSION]:
+        temporary.unlink()
+        raise ValueError(f"normal expression SHA-256 changed: {digest}")
     os.replace(temporary, NORMAL_EXPRESSION)
-    return sha256_file(NORMAL_EXPRESSION)
+    return digest
 
 
 def fetch_normals(
@@ -227,6 +233,14 @@ def fetch_normals(
     """Fetch and freeze all normal expression values in bounded blocks."""
     if chunk_size < 1:
         raise ValueError("--xena-chunk-size must be positive")
+    if not refresh and NORMAL_SOURCE_MANIFEST.exists():
+        try:
+            cached_samples = json.loads(NORMAL_SOURCE_MANIFEST.read_text()).get("samples", [])
+            if len(cached_samples) == EXPECTED["normals"] and normal_cache_is_valid(transcript_ids, cached_samples):
+                LOGGER.info("Using validated cached normals without a network query")
+                return
+        except (OSError, json.JSONDecodeError) as error:
+            LOGGER.warning("Cannot reuse normal source sidecar: %s", error)
     samples = discover_normals(tumor_samples, transcript_ids[0])
     if not refresh and normal_cache_is_valid(transcript_ids, samples):
         LOGGER.info("Using cached normal expression: %s", NORMAL_EXPRESSION)
@@ -287,6 +301,8 @@ def fetch_uniprot() -> None:
         sequence = "".join(lines[1:]).upper()
         if not lines or not lines[0].startswith(f">sp|{accession}|"):
             raise ValueError(f"UniProt entry is not reviewed: {accession}")
+        if sha256_text(sequence) != PINNED_PROTEIN_SHA256[accession]:
+            raise ValueError(f"canonical protein sequence changed: {accession}")
         if len(sequence) != expected_length:
             raise ValueError(f"wrong canonical length for {accession}")
         releases.add((headers["x-uniprot-release"], headers["x-uniprot-release-date"]))
@@ -341,6 +357,7 @@ def validate_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         path = SOURCE_DIR / f"uniprot_{entry['accession']}.fasta"
         if not path.exists() or sha256_file(path) != entry.get("sha256"):
             raise ValueError(f"UniProt source mismatch: {path}")
+    load_protein_rows(uniprot)
     return normal, xena, uniprot
 
 
@@ -352,6 +369,8 @@ def load_protein_rows(uniprot: dict[str, Any]) -> list[dict[str, Any]]:
         if len(records) != 1 or records[0][0] != "sp" or f"|{accession}|" not in records[0][1]:
             raise ValueError(f"invalid reviewed UniProt FASTA for {accession}")
         sequence = records[0][2]
+        if sha256_text(sequence) != PINNED_PROTEIN_SHA256[accession]:
+            raise ValueError(f"canonical protein sequence changed: {accession}")
         if len(sequence) != expected_length or set(sequence) - set("ACDEFGHIKLMNPQRSTVWY"):
             raise ValueError(f"invalid canonical protein sequence for {accession}")
         rows.append({"Protein_id": isoform, "Prot_seqs": sequence, "gene_symbol": symbol,
@@ -386,6 +405,7 @@ def main() -> None:
         download_file(url, destination, expected_md5=expected_md5)
     fetch_uniprot()
     fetch_normals(transcript_ids, tumor_samples, args.xena_chunk_size, args.refresh_normals)
+    validate_sources()
     LOGGER.info("LUAD sources are complete under %s", SOURCE_DIR)
 
 

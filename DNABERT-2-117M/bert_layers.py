@@ -142,7 +142,8 @@ class BertUnpadSelfAttention(nn.Module):
                 alibi_slopes: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Perform self-attention.
 
-        If dropout is zero and flash_attn is available, use the optimized flash attention.
+        Use flash attention only for explicitly half-precision inputs.
+        Float32 inputs must remain float32 throughout attention.
         Otherwise, fall back to standard PyTorch implementation.
 
         Args:
@@ -159,7 +160,7 @@ class BertUnpadSelfAttention(nn.Module):
         """
         qkv = self.Wqkv(hidden_states)
         
-        if self.p_dropout or not FLASH_ATTN_AVAILABLE:
+        if self.p_dropout or not FLASH_ATTN_AVAILABLE or qkv.dtype == torch.float32:
             # PyTorch fallback path - needs padded tensors and full bias matrix
             qkv = pad_input(qkv, indices, cu_seqlens.shape[0] - 1,
                             max_seqlen_in_batch)  # batch, max_seqlen_in_batch, thd
