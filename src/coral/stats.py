@@ -14,7 +14,7 @@ Two functions, both shape-agnostic in the per-unit arrays:
     over *precomputed* per-unit scalars, e.g. a per-complex AUPRC distribution.
 
 The score and label arrays must be aligned and the same shape; numpy
-boolean indexing flattens them, so 2D contact matrices and 1D residue masks
+boolean indexing flattens them, so 1D residue masks and 2D label matrices
 both work without a code change.
 """
 
@@ -95,7 +95,7 @@ def bootstrap_over_units(
 ) -> dict:
     """Cluster bootstrap of an aggregate over independent units.
 
-    Unlike `hierarchical_bootstrap`, which recomputes the contact-vs-non-contact
+    Unlike `hierarchical_bootstrap`, which recomputes the label-1-vs-label-0
     Δ from raw (score, label) arrays, this takes *precomputed* per-unit scalars
     (e.g. one AUPRC per complex) and resamples the units with replacement,
     recomputing `agg` each iteration. So any metric — AUPRC, AUROC, lift — can be

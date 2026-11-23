@@ -2,9 +2,8 @@
 
 The RBD annotation pipeline (parse_rbd_domtbl.py) emits a long-format TSV with
 1-based inclusive `merged_start`/`merged_end` per protein. This module loads
-that TSV into a runtime dict, mirroring how `DataCollatorForContactPrediction`
-consumes its `all_contacts` argument, and converts intervals to a 0-based
-residue boolean mask.
+that TSV into the `{protein_id: intervals}` dict that `DataCollatorForRBDPrediction`
+consumes, and converts intervals to a 0-based residue boolean mask.
 """
 
 from pathlib import Path

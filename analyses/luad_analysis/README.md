@@ -103,8 +103,7 @@ subdirectories. Supplementary figures are named after their number in the paper.
 
 ## Running
 
-From the repository root, in the `coral` environment, after the inputs. s8 also needs `openpyxl` to read the purity
-spreadsheet (`pip install openpyxl`); `environment.yml` does not install it.
+From the repository root, in the `coral` environment (no extra packages), after the inputs:
 
 ```bash
 for s in s1_cohorts s2_panels s3_overlap s4_stage s5_tnm s6_igf2bp1_dependence s8_composition figure_main; do

@@ -10,14 +10,15 @@
 # if done), one (GPU, default 0) for the attention steps. hmmscan and Pfam-A are needed only if the
 # checkpoint calls a protein outside data/rbd/scanned_proteins.fa, which the paper's model never does.
 #
-#   CKPT=checkpoints/coral-epoch-9 conda run --no-capture-output -n coral \
-#     bash analyses/RBD_analysis/run.sh
+#   conda run --no-capture-output -n coral bash analyses/RBD_analysis/run.sh
+#
+# CKPT (default checkpoints/coral-epoch-9) selects another checkpoint directory.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 cd "$REPO"
-CKPT="${CKPT:-checkpoints/coraldegree50-fulldataset-epoch-9}"
+CKPT="${CKPT:-checkpoints/coral-epoch-9}"
 NAME="$(basename "$CKPT")"
 PRED=data/predictions/$NAME
 FASTA=data/sequences/$NAME/predicted_interacting_proteins.fa

@@ -4,10 +4,6 @@
 takes the **last** cross-attention layer, optionally averages a subset of heads,
 and strips CLS/SEP/PAD positions so the returned matrices line up with raw
 sequence coordinates.
-
-`contact_labels` is optional: 2D per-pair label matrices passed here are cropped
-in step with the attention. The RBD analysis passes nothing and only needs the
-special-token stripping.
 """
 
 from typing import Dict, List, Optional
@@ -21,7 +17,7 @@ def decode_sequences(input_ids: torch.Tensor, tokenizer) -> List[str]:
 
 
 class AttentionAnalyzer:
-    """Extract cross-attention scores aligned with per-token/per-residue labels."""
+    """Extract last-layer cross-attention trimmed to raw sequence coordinates."""
 
     def __init__(self, model, rna_tokenizer, protein_tokenizer,
                  device=torch.device("cuda")):
@@ -34,7 +30,6 @@ class AttentionAnalyzer:
         self,
         rna_batch: Dict,
         protein_batch: Dict,
-        contact_labels: Optional[torch.Tensor] = None,
         subset: Optional[List[int]] = None,
     ) -> Dict:
         """Extract last-layer cross-attention for a batch of RNA-protein pairs.
@@ -42,14 +37,11 @@ class AttentionAnalyzer:
         Args:
             rna_batch: RNA batch with input_ids and attention_mask.
             protein_batch: Protein batch with input_ids and attention_mask.
-            contact_labels: Optional 2D contact matrices, cropped alongside the
-                attention. When None the returned `*_contact_labels` lists are
-                empty and only special-token stripping happens.
             subset: Head indices to average. When None every head is kept and the
                 returned arrays carry a leading head axis.
 
         Returns:
-            Dict of per-pair attention matrices and, optionally, contact labels.
+            Dict of per-pair attention matrices, one list per direction.
         """
         self.model.eval()
         self.model.to(self.device)
@@ -79,9 +71,6 @@ class AttentionAnalyzer:
             processed_rna_to_protein_att = []
             processed_protein_to_rna_att = []
 
-            processed_rna2protein_contact_labels = []
-            processed_protein2rna_contact_labels = []
-
             batch_size = rna_to_protein_att.size(0)
             for i in range(batch_size):
 
@@ -99,16 +88,7 @@ class AttentionAnalyzer:
                 processed_rna_to_protein_att.append(rna_att)
                 processed_protein_to_rna_att.append(protein_att)
 
-                if contact_labels is not None:
-                    rna2protein_contact_labels = contact_labels[i][1:rna_len + 1, 1:protein_len + 1].cpu().numpy()
-                    protein2rna_contact_labels = rna2protein_contact_labels.T
-
-                    processed_rna2protein_contact_labels.append(rna2protein_contact_labels)
-                    processed_protein2rna_contact_labels.append(protein2rna_contact_labels)
-
         return {
             "rna_to_protein_attentions": processed_rna_to_protein_att,
             "protein_to_rna_attentions": processed_protein_to_rna_att,
-            "rna2protein_contact_labels": processed_rna2protein_contact_labels,
-            "protein2rna_contact_labels": processed_protein2rna_contact_labels,
         }

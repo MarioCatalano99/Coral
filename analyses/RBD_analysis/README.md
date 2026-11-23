@@ -10,12 +10,12 @@ profile.
 From the repository root, in the `coral` environment:
 
 ```bash
-CKPT=checkpoints/coral-epoch-9 bash analyses/RBD_analysis/run.sh
+bash analyses/RBD_analysis/run.sh
 ```
 
-`CKPT` is the paper's final model, as `scripts/download_weights.sh` installs it (Zenodo weights v3). It defaults
-to `checkpoints/coraldegree50-fulldataset-epoch-9`, the local name of the same files. The run needs the benchmark
-splits in `data/datasets/` (`scripts/download_data.sh`) and takes about 30 min on two GPUs.
+It uses `checkpoints/coral-epoch-9`, the paper's final model as `scripts/download_weights.sh` installs it (Zenodo
+weights v3); set `CKPT` to another checkpoint directory to use that instead. The run needs the benchmark splits in
+`data/datasets/` (`scripts/download_data.sh`) and takes about 30 min on two GPUs.
 
 | Step | Script | Does |
 | --- | --- | --- |

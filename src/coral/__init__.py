@@ -4,7 +4,6 @@ from . import paths
 from .model import Coral, CoralConfig, CoralPretraining
 from .data import (
     CoralDataCollator,
-    DataCollatorForContactPrediction,
     DataCollatorForInference,
     DataCollatorForRBDPrediction,
 )
@@ -31,7 +30,6 @@ __all__ = [
     "CoralPretraining",
     # collators
     "CoralDataCollator",
-    "DataCollatorForContactPrediction",
     "DataCollatorForInference",
     "DataCollatorForRBDPrediction",
     # attention interpretability

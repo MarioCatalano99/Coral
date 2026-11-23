@@ -314,7 +314,7 @@ needed. It takes about 30 min on two GPUs; `analyses/RBD_analysis/README.md` lis
 steps, inputs and outputs.
 
 ```bash
-CKPT=checkpoints/coral-epoch-9 bash analyses/RBD_analysis/run.sh
+bash analyses/RBD_analysis/run.sh
 ```
 
 Expected results:
