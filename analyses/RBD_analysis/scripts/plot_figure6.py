@@ -1,15 +1,16 @@
-"""Render Figure 6 panels for the CORAL paper (RBD_analysis result).
+"""Render the RBD attention figure of the CORAL paper (Figure 4 in the final paper).
 
   a  exemplar protein attention tracks with RBD intervals marked
   b  per-protein Δ distribution against the position-shuffle null
-  c  per-family Cohen's d forest plot
-  d  per-protein Cohen's d ECDF
+  c  per-protein Cohen's d ECDF
+  d  per-family effect size (mean Δ / SD across proteins) forest plot
 
 The unit of analysis is the protein (per-protein consensus profile). Reads
-artifacts from `analyses/RBD_analysis/results/<model>/heads_best/`; writes 4
-PDF + SVG + JPEG figures into `<results_dir>/figures/`.
+artifacts from `<results_dir>/heads_best/`; writes each panel as SVG and JPEG to
+`<results_dir>/figures/{svg,jpg}/fig6<x>_*`, then assembles them in the paper's
+layout as `<results_dir>/figures/figure6.{svg,jpg}`.
 
-Run from repo root with the `encodersenv` conda env active:
+Run from the repo root:
     python analyses/RBD_analysis/scripts/plot_figure6.py
 """
 
@@ -18,9 +19,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
@@ -28,7 +29,9 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Patch, Rectangle
+from matplotlib.textpath import TextPath
 from matplotlib.ticker import FuncFormatter, MaxNLocator
+from PIL import Image
 
 # Make the repo root importable so we can use `coral.*` regardless of cwd.
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -62,12 +65,13 @@ FAMILY_DISPLAY = {
     "dsrm": "dsRBD",
 }
 
+# Panel a exemplars: five RBD families, one to four RBDs, 319-579 aa, ordered by RBD count.
 EXEMPLARS = [
-    ("Q92879", "CELF1", "RRM"),
-    ("Q9BYJ9", "YTHDF1", "YTH"),
-    ("P22893", "ZFP36",  "zf-CCCH"),
-    ("O95793", "STAU1",  "dsRBD"),
-    ("Q92945", "KHSRP",  "KH"),
+    ("Q9Y5A9", "YTHDF2",      "YTH"),
+    ("P22893", "Zfp36",       "zf-CCCH"),
+    ("Q96PM9", "ZNF385A",     "zf-matrin"),
+    ("Q92879", "CELF1",       "RRM"),
+    ("Q96I24", "FUBP3",       "KH"),
 ]
 
 MM = 1.0 / 25.4  # mm -> inches
@@ -136,7 +140,26 @@ def load_artifacts(results_dir: Path) -> Artifacts:
     )
 
 
-# --- Panel A: exemplar protein heatmap ------------------------------------- #
+# --- Panel a: exemplar protein heatmap ------------------------------------- #
+
+BAR_LABEL_FONTSIZE = 6.5
+BAR_LABEL_PAD_PT = 4.0
+
+
+def _label_groups(spans: list[tuple[int, int]], label_width: float) -> list[tuple[int, int]]:
+    """Group consecutive bars whose labels would overlap; one label is drawn per group.
+
+    `label_width` is in data units. A bar joins the previous group when its centre is
+    closer than one label width to the group's centre.
+    """
+    groups: list[list[int]] = []
+    for s0, e0 in spans:
+        if groups and (s0 + e0) / 2 - (groups[-1][0] + groups[-1][1]) / 2 < label_width:
+            groups[-1][1] = e0
+        else:
+            groups.append([s0, e0])
+    return [(g0, g1) for g0, g1 in groups]
+
 
 def panel_a(intervals_dict: dict, npz: dict) -> plt.Figure:
     protein_ids = np.asarray(npz["protein_ids"])
@@ -187,10 +210,12 @@ def panel_a(intervals_dict: dict, npz: dict) -> plt.Figure:
         im = ax.imshow(masked, aspect="auto", cmap=cmap, vmin=0.0, vmax=1.0,
                        interpolation="nearest", extent=[0, max_len, 0, 1])
 
-        # RBD bars just above the track. Annotate the family on the first bar.
+        # RBD bars just above the track, each labelled with the family. Bars closer than a
+        # label's width share one centred label.
         bar_y = 1.05
         bar_h = 0.25
-        for j, (s, e) in enumerate(r["intervals"]):
+        spans = []
+        for s, e in r["intervals"]:
             # 1-based inclusive -> 0-based half-open.
             s0, e0 = max(0, s - 1), min(r["length"], e)
             if e0 <= s0:
@@ -200,10 +225,14 @@ def panel_a(intervals_dict: dict, npz: dict) -> plt.Figure:
                 facecolor=PALETTE["rbd_bar"], edgecolor="none",
                 clip_on=False, transform=ax.transData,
             ))
-            if j == 0:
-                ax.text((s0 + e0) / 2, bar_y + bar_h + 0.05, r["family"],
-                        fontsize=6.5, ha="center", va="bottom",
-                        color=PALETTE["rbd_bar"], clip_on=False)
+            spans.append((s0, e0))
+        axis_width_pt = ax.get_position().width * fig.get_figwidth() * 72
+        text_width_pt = TextPath((0, 0), r["family"], size=BAR_LABEL_FONTSIZE).get_extents().width
+        label_width = (text_width_pt + BAR_LABEL_PAD_PT) * max_len / axis_width_pt
+        for g0, g1 in _label_groups(spans, label_width):
+            ax.text((g0 + g1) / 2, bar_y + bar_h + 0.05, r["family"],
+                    fontsize=BAR_LABEL_FONTSIZE, ha="center", va="bottom",
+                    color=PALETTE["rbd_bar"], clip_on=False)
 
         # Track frame: keep only bottom spine; remove ticks except on bottom-most.
         ax.set_yticks([])
@@ -234,11 +263,11 @@ def panel_a(intervals_dict: dict, npz: dict) -> plt.Figure:
     cbar.ax.tick_params(labelsize=7)
     cbar.outline.set_linewidth(0.5)
 
-    fig.text(0.01, 0.96, "A", fontsize=12, fontweight="bold")
+    fig.text(0.01, 0.96, "a", fontsize=12, fontweight="bold")
     return fig
 
 
-# --- Panel B: Δ distribution with shuffle null as a band ------------------- #
+# --- Panel b: Δ distribution with shuffle null as a band ------------------- #
 
 def _bootstrap_mean_ci(values: np.ndarray, n_boot: int = 10_000,
                        alpha: float = 0.05, seed: int = 42) -> tuple[float, float]:
@@ -346,13 +375,17 @@ def panel_b(stats: pd.DataFrame, null: pd.DataFrame) -> plt.Figure:
     fig.text(0.5, 0.04,
              f"{p_label}   |   {n_pos}/{n_total} proteins Δ > 0",
              ha="center", va="center", fontsize=7, color="#1e293b")
-    fig.text(0.01, 0.96, "B", fontsize=12, fontweight="bold")
+    fig.text(0.01, 0.96, "b", fontsize=12, fontweight="bold")
     return fig
 
 
-# --- Panel C: family forest plot ------------------------------------------- #
+# --- Panel d: family forest plot ------------------------------------------- #
+#
+# The family effect size is mean Δ / SD of Δ across the family's proteins (column
+# `cohens_d` of controls.py), a different quantity from the within-protein Cohen's d
+# of panel c, hence the axis label.
 
-def panel_c(families: pd.DataFrame, d_cap: float = 10.0) -> plt.Figure:
+def panel_d(families: pd.DataFrame, d_cap: float = 10.0) -> plt.Figure:
     df = families.sort_values("cohens_d", ascending=False).reset_index(drop=True)
     n = len(df)
 
@@ -380,7 +413,7 @@ def panel_c(families: pd.DataFrame, d_cap: float = 10.0) -> plt.Figure:
     ax.axvline(0, color=PALETTE["zero"], linestyle="--", linewidth=0.7)
     ax.set_yticks(y)
     ax.set_yticklabels(display_names, fontsize=8)
-    ax.set_xlabel("Cohen's d")
+    ax.set_xlabel("Effect size across proteins")
     ax.set_xlim(min(-0.5, df["d_lo"].min() - 0.3), d_cap + 0.6)
     ax.grid(axis="x", alpha=0.4)
     ax.grid(axis="y", visible=False)
@@ -392,13 +425,13 @@ def panel_c(families: pd.DataFrame, d_cap: float = 10.0) -> plt.Figure:
                 transform=blended, fontsize=6.5, va="center",
                 ha="left", color="#475569")
 
-    ax.set_title(f"Per-protein ({n} families)", fontsize=8.5)
+    ax.set_title("RBD families with ≥ 10 proteins", fontsize=8.5)
 
-    fig.text(0.01, 0.97, "C", fontsize=12, fontweight="bold")
+    fig.text(0.01, 0.97, "d", fontsize=12, fontweight="bold")
     return fig
 
 
-# --- Panel D: per-unit Cohen's d ECDF -------------------------------------- #
+# --- Panel c: per-unit Cohen's d ECDF -------------------------------------- #
 
 def _per_protein_cohens_d(npz: dict) -> np.ndarray:
     """Per-protein Cohen's d via the shared `coral.stats` helper.
@@ -415,7 +448,7 @@ def _per_protein_cohens_d(npz: dict) -> np.ndarray:
     return np.asarray(cohens_d_per_unit(scores, labels), dtype=np.float64)
 
 
-def panel_d(npz: dict) -> plt.Figure:
+def panel_c(npz: dict) -> plt.Figure:
     d = _per_protein_cohens_d(npz)
     n = len(d)
     if n == 0:
@@ -452,44 +485,95 @@ def panel_d(npz: dict) -> plt.Figure:
     ax.grid(axis="y", alpha=0.4)
     ax.grid(axis="x", visible=False)
 
-    fig.text(0.01, 0.96, "D", fontsize=12, fontweight="bold")
+    fig.text(0.01, 0.96, "c", fontsize=12, fontweight="bold")
     return fig
 
 
-# --- IO + orchestration ---------------------------------------------------- #
+# --- IO ------------------------------------------------------------------- #
+
+PANELS = ("fig6a_heatmap", "fig6b_delta", "fig6c_ecdf", "fig6d_forest")
+FIGURE_STEM = "figure6"
+
 
 def save_fig(fig: plt.Figure, out_dir: Path, stem: str) -> None:
-    pdf_dir = out_dir / "pdf"
-    svg_dir = out_dir / "svg"
-    jpg_dir = out_dir / "jpeg"
-    pdf_dir.mkdir(parents=True, exist_ok=True)
-    svg_dir.mkdir(parents=True, exist_ok=True)
-    jpg_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = pdf_dir / f"{stem}.pdf"
-    svg_path = svg_dir / f"{stem}.svg"
-    jpg_path = jpg_dir / f"{stem}.jpg"
-    fig.savefig(pdf_path, format="pdf", bbox_inches="tight", dpi=400)
-    fig.savefig(svg_path, format="svg", bbox_inches="tight")
-    fig.savefig(jpg_path, format="jpeg", bbox_inches="tight", dpi=400,
+    """Write <out_dir>/svg/<stem>.svg (editable text) and <out_dir>/jpg/<stem>.jpg at 400 dpi."""
+    for kind in ("svg", "jpg"):
+        (out_dir / kind).mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "svg" / f"{stem}.svg", format="svg", bbox_inches="tight")
+    fig.savefig(out_dir / "jpg" / f"{stem}.jpg", format="jpeg", bbox_inches="tight", dpi=400,
                 facecolor="white", pil_kwargs={"quality": 95})
     plt.close(fig)
-    log.info("Wrote %s + .svg", pdf_path.name)
+    log.info("Wrote %s.{svg,jpg}", stem)
 
 
-def _try_panel(name: str, fn, *args, **kwargs) -> Optional[plt.Figure]:
-    try:
-        return fn(*args, **kwargs)
-    except FileNotFoundError as exc:
-        log.warning("Skipping %s: missing input %s", name, exc)
-    except Exception as exc:  # noqa: BLE001 - report and continue
-        log.exception("Skipping %s: %s", name, exc)
-    return None
+# --- Assembly: a on top, b and c below it, d at the right ------------------ #
 
+def montage_layout(sizes: list[tuple[float, float]]) -> list[tuple[float, float, float, float]]:
+    """(x, y, w, h) per panel: a at full width, b and c scaled to half of it, d scaled to their height."""
+    (wa, ha), (wb, hb), (wc, hc), (wd, hd) = sizes
+    hb2, hc2 = hb * (wa / 2) / wb, hc * (wa / 2) / wc
+    left_h = ha + max(hb2, hc2)
+    return [(0, 0, wa, ha), (0, ha, wa / 2, hb2), (wa / 2, ha, wa / 2, hc2),
+            (wa, 0, wd * left_h / hd, left_h)]
+
+
+def _prefix_ids(root: ET.Element, prefix: str) -> None:
+    """Make a panel's ids unique within the montage: matplotlib reuses ids such as clip paths
+    across files, and one SVG document resolves each id to its first definition."""
+    xlink_href = "{http://www.w3.org/1999/xlink}href"
+    for el in root.iter():
+        for key, value in el.attrib.items():
+            if key == "id":
+                el.set(key, prefix + value)
+            elif key in (xlink_href, "href") and value.startswith("#"):
+                el.set(key, "#" + prefix + value[1:])
+            elif "url(#" in value:
+                el.set(key, value.replace("url(#", f"url(#{prefix}"))
+
+
+def montage_svg(fig_dir: Path, out: Path) -> None:
+    """Vector montage: each panel SVG nested as an <svg> element at its layout box."""
+    ns = "http://www.w3.org/2000/svg"
+    ET.register_namespace("", ns)
+    ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+    roots = [ET.parse(fig_dir / "svg" / f"{stem}.svg").getroot() for stem in PANELS]
+    for k, root in enumerate(roots):
+        _prefix_ids(root, f"panel{k}_")
+    sizes = [(float(r.get("width").removesuffix("pt")), float(r.get("height").removesuffix("pt")))
+             for r in roots]
+    boxes = montage_layout(sizes)
+    width = max(x + w for x, _, w, _ in boxes)
+    height = max(y + h for _, y, _, h in boxes)
+    top = ET.Element(f"{{{ns}}}svg", {"width": f"{width:.2f}pt", "height": f"{height:.2f}pt",
+                                      "viewBox": f"0 0 {width:.2f} {height:.2f}", "version": "1.1"})
+    ET.SubElement(top, f"{{{ns}}}rect", {"width": "100%", "height": "100%", "fill": "white"})
+    for root, (x, y, w, h) in zip(roots, boxes):
+        nested = ET.SubElement(top, f"{{{ns}}}svg", {
+            "x": f"{x:.2f}", "y": f"{y:.2f}", "width": f"{w:.2f}", "height": f"{h:.2f}",
+            "viewBox": root.get("viewBox"), "preserveAspectRatio": "xMidYMid meet"})
+        nested.extend(child for child in root if child.tag != f"{{{ns}}}metadata")
+    ET.ElementTree(top).write(out, encoding="utf-8", xml_declaration=True)
+    log.info("Wrote %s", out)
+
+
+def montage_jpg(fig_dir: Path, out: Path) -> None:
+    """Raster montage of the 400-dpi panel JPEGs, in the same layout as the SVG."""
+    images = [Image.open(fig_dir / "jpg" / f"{stem}.jpg").convert("RGB") for stem in PANELS]
+    boxes = montage_layout([im.size for im in images])
+    canvas = Image.new("RGB", (round(max(x + w for x, _, w, _ in boxes)),
+                               round(max(y + h for _, y, _, h in boxes))), "white")
+    for im, (x, y, w, h) in zip(images, boxes):
+        canvas.paste(im.resize((round(w), round(h))), (round(x), round(y)))
+    canvas.save(out, quality=92)
+    log.info("Wrote %s", out)
+
+
+# --- Orchestration --------------------------------------------------------- #
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=None,
-                        help="Override the output directory (default results/<model>/figures).")
+                        help="Override the output directory (default <results_dir>/figures).")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -497,7 +581,7 @@ def main(argv=None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    # Silence the noisy per-PDF font-subsetting chatter from matplotlib.
+    # Silence the noisy font-subsetting chatter from matplotlib.
     logging.getLogger("fontTools").setLevel(logging.WARNING)
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
@@ -511,34 +595,16 @@ def main(argv=None) -> int:
     log.info("Results dir: %s", results_dir)
     log.info("Output dir:  %s", out_dir)
 
-    intervals_path = results_dir / "rbd_annotations.rbd_intervals.tsv"
-    intervals_dict = (load_rbd_intervals(intervals_path)
-                      if intervals_path.exists() else {})
-    if not intervals_dict:
-        log.warning("RBD intervals TSV missing or empty at %s", intervals_path)
+    # Every panel is required: the assembled figure must never mix in a stale panel file.
+    intervals_dict = load_rbd_intervals(results_dir / "rbd_annotations.rbd_intervals.tsv")
+    arts = load_artifacts(results_dir)
+    save_fig(panel_a(intervals_dict, arts.npz), out_dir, PANELS[0])
+    save_fig(panel_b(arts.stats, arts.null), out_dir, PANELS[1])
+    save_fig(panel_c(arts.npz), out_dir, PANELS[2])
+    save_fig(panel_d(arts.families), out_dir, PANELS[3])
 
-    try:
-        arts = load_artifacts(results_dir)
-    except FileNotFoundError as exc:
-        log.error("Missing input %s (run the analysis scripts first)", exc)
-        return 2
-
-    fig = _try_panel("Panel A", panel_a, intervals_dict, arts.npz)
-    if fig is not None:
-        save_fig(fig, out_dir, "fig6a_heatmap")
-
-    fig = _try_panel("Panel B", panel_b, arts.stats, arts.null)
-    if fig is not None:
-        save_fig(fig, out_dir, "fig6b_delta")
-
-    fig = _try_panel("Panel C", panel_c, arts.families)
-    if fig is not None:
-        save_fig(fig, out_dir, "fig6c_forest")
-
-    fig = _try_panel("Panel D", panel_d, arts.npz)
-    if fig is not None:
-        save_fig(fig, out_dir, "fig6d_ecdf")
-
+    montage_svg(out_dir, out_dir / f"{FIGURE_STEM}.svg")
+    montage_jpg(out_dir, out_dir / f"{FIGURE_STEM}.jpg")
     return 0
 
 

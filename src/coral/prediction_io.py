@@ -25,6 +25,22 @@ def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def checkpoint_hash(path: Path) -> str:
+    """Hash checkpoint filenames and contents deterministically."""
+    if path.is_file():
+        return sha256_file(path)
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+    digest = hashlib.sha256()
+    files = sorted(item for item in path.rglob("*") if item.is_file() and "__pycache__" not in item.parts and not item.name.startswith("."))
+    if not files:
+        raise ValueError(f"checkpoint directory is empty: {path}")
+    for file_path in files:
+        digest.update(str(file_path.relative_to(path)).encode())
+        digest.update(bytes.fromhex(sha256_file(file_path)))
+    return digest.hexdigest()
+
+
 def validate_scores(frame: pd.DataFrame) -> None:
     """Reject missing keys, duplicate pairs and invalid model outputs."""
     if list(frame.columns) != COLUMNS or frame.isna().any().any():

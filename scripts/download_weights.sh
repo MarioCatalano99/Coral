@@ -7,8 +7,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${ROOT}/checkpoints/coral-epoch-9"
 ARCHIVE="coral-epoch-9.tar.gz"
 # Concept DOI: always resolves to the newest version of the record.
-# Versions before v2 hold a checkpoint that does not match the published
-# architecture (LoRA r=8, no reverse_projection) — do not pin to them.
+# v3 (10.5281/zenodo.24465806) is the final model of the paper, trained on
+# degree-corrected negatives.
+# v2 (10.5281/zenodo.21748220) is the preprint's model, trained with uniformly
+# sampled negatives. v1 does not match the published architecture (LoRA r=8,
+# no reverse_projection); do not pin to it.
 CONCEPT_DOI="10.5281/zenodo.19729892"
 
 # --- Resolve the concept DOI to the newest version's record --- #

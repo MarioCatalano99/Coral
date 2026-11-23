@@ -2,7 +2,7 @@
 
 ![CORAL architecture overview](docs/assets/hero.png)
 
-*Bidirectional cross-attention over ESM-2 and DNABERT2 representations, fine-tuned with Low-Rank Adaptation, predicts RNA-protein interactions while learning attention patterns that align with structural contact interfaces.*
+*Bidirectional cross-attention links DNABERT-2 and ESM-2 so that each molecule is encoded in the context of its partner; both encoders are adapted to the task by low-rank adaptation.*
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
@@ -10,15 +10,88 @@
 
 ## Summary
 
-CORAL (Cross-attention for RNA-protein Association Learning) is a deep-learning framework for predicting RNA-protein interactions from sequence alone. Unlike methods that encode each molecule in isolation and combine the resulting vectors late, CORAL couples a pretrained protein language model (ESM-2) and a pretrained nucleotide language model (DNABERT2) through a bidirectional cross-attention encoder, then fine-tunes both backbones jointly with Low-Rank Adaptation. Alongside the model we release a benchmarking framework that partitions RNA-protein pairs under three levels of train/test redundancy — conventional random splits, pairwise non-redundant splits, and the more stringent component-wise non-redundant splits — exposing the gap between benchmark accuracy and true generalization that has been masked in prior work. Under the most stringent component-wise evaluation CORAL holds an F1 of 0.65 where the next-best method drops to 0.55, and specific cross-attention heads attend systematically to structurally resolved contact residues (27% elevated attention at interface positions across 309 experimentally resolved complexes, p < 0.01).
+CORAL (Cross-attention for RNA-protein Association Learning) predicts whether an RNA
+and a protein interact from their sequences alone. It links two pretrained language
+models, DNABERT-2 for the RNA and the 150M-parameter ESM-2 for the protein, through a
+bidirectional cross-attention encoder. Each molecule is therefore represented in the
+light of its partner. Both encoders are adapted to the task by low-rank adaptation
+(LoRA).
+
+Reported accuracies for this task depend on how the benchmark is built, so we rebuilt
+the evaluation to close two shortcuts:
+
+- **Sequence similarity** between training and test molecules. It is controlled
+  separately for the RNA and the protein, up to a component-wise split in which neither
+  molecule of a test pair has a relative in training.
+- **Concentration of known interactions** on heavily studied molecules. It is halved
+  by degree-corrected sampling of non-interacting pairs.
+
+When neither molecule had a relative in training, four published predictors ranked
+pairs close to chance (AUC 0.48–0.59), while CORAL retained an AUC of 0.72. CORAL was
+never shown a structure, yet its protein-side cross-attention was higher inside
+annotated RNA-binding domains than outside them in 94% of proteins. In TCGA lung
+adenocarcinoma, CORAL's top-ranked candidate targets of the oncofetal protein IGF2BP1
+were associated with pathological stage in the 86 tumours expressing it. The part of
+that association specific to CORAL's candidates followed lymph-node involvement.
+
+## Key results
+
+**Benchmark (Figure 3).** AUC, mean over five folds per split, from the same training
+and test pairs for every method. Clusters were built at 60% protein and 80% RNA sequence
+identity. Every set is balanced, with degree-corrected negatives.
+
+| Split | CORAL | ZHMolGraph | IPMiner | NPI-GNN | SeqMG |
+| --- | --- | --- | --- | --- | --- |
+| Redundant (random) | **0.945 ± 0.002** | 0.92 ± 0.02 | 0.88 | 0.84 | 0.69 |
+| Pairwise | **0.939 ± 0.002** | 0.87 | 0.86 | 0.87 | 0.68 |
+| Component-wise | **0.72 ± 0.03** | 0.59 ± 0.08 | 0.53 | 0.48 ± 0.02 | 0.57 |
+
+- **Component-wise split:** CORAL's accuracy was 0.66 ± 0.04 and its F1 0.66 ± 0.06.
+  The published methods reached accuracies of 0.50–0.55. ZHMolGraph's F1 of 0.62 came
+  from calling most pairs interacting (recall 0.76, specificity 0.35).
+- **Uniformly sampled negatives:** the five methods were nearly indistinguishable on
+  the redundant and pairwise splits. On the component-wise split, CORAL's accuracy
+  barely moved between negative sets (0.68 uniform, 0.66 degree-corrected), while
+  ZHMolGraph's fell from 0.63 to 0.55.
+
+**Attention at RNA-binding domains (Figure 4).** 496 proteins carry Pfam annotations
+from 85 RNA-binding families. The final model's RNA→protein attention, from heads 5, 10
+and 11 of the last cross-attention layer, was higher inside the annotated domains than
+outside in 467 of them (94.2%).
+
+- Mean Δ was 2.65 × 10⁻³ (95% CI 2.46–2.85 × 10⁻³), with t(495) = 26.2. The median
+  per-protein Cohen's d was 0.88.
+- The observed Δ exceeded all 1,000 rotations of the domain annotation along each
+  protein.
+- The effect was significant in 13 of the 14 domain families with at least ten
+  proteins. PUA was the exception.
+
+**Lung adenocarcinoma (Figure 5).** For IGF2BP1, the panel is the 334 transcripts
+CORAL ranks in the top 1% of those expressed in TCGA LUAD.
+
+- **Stage:** panel expression fell with pathological stage in the 86 IGF2BP1-positive
+  tumours (Spearman ρ = −0.27, BH q = 0.031). Fewer than 3% of random panels matched
+  for expression and length were as strongly associated (competitive P = 0.027;
+  0.018 with GC content also matched).
+- **IGF2BP1-negative tumours:** the gradient was absent.
+- **N versus T:** the part specific to CORAL's candidates followed nodal involvement
+  (N given T, competitive P = 0.018), not primary-tumour extent (T given N, P = 0.77).
+- **Other proteins:** the IGF2BP3 and LIN28B panels were not associated with stage.
 
 ## Key features
 
-- **Bidirectional cross-attention encoder** that lets RNA and protein representations condition on each other during encoding rather than only at classification time.
-- **LoRA fine-tuning** of ESM-2 and DNABERT2 so pretrained sequence knowledge is preserved while task-specific features are learned.
-- **Three-tier non-redundant evaluation framework** (random, pairwise, component-wise) that surfaces real-world generalization behavior.
-- **Interpretable attention heads** — cross-attention heads systematically prioritise structural contact positions and RNA-binding domains without explicit structural supervision.
-- **Released trained checkpoint** for direct inference; training from scratch is provided as a reference implementation.
+- **Bidirectional cross-attention encoder.** Two stacked cross-modality layers with
+  separate weights for each direction. RNA and protein condition on each other during
+  encoding rather than only at the classifier.
+- **LoRA adaptation of both encoders** (r = 16, α = 8). The pretrained representations
+  can reorganise around the task at a fraction of the cost of full fine-tuning.
+- **A benchmark that closes two shortcuts.**
+  - Three splits of increasing stringency: redundant, pairwise and component-wise.
+  - Negatives that remove half of each molecule's degree imbalance.
+- **Interpretable attention.** Every head yields an explicit RNA k-mer × protein
+  residue matrix. Protein-side attention concentrates on annotated RNA-binding domains
+  without structural supervision.
+- **Released final model and benchmark splits** on Zenodo.
 
 ## Installation
 
@@ -51,8 +124,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
 ```
 
-Step 3 is a convenience, not a requirement: every script and notebook puts
-`src/` on `sys.path` itself, so a fresh clone runs without installing anything.
+Step 3 is a convenience, not a requirement: every script puts `src/` on
+`sys.path` itself, so a fresh clone runs without installing anything.
 
 ## Quick start
 
@@ -75,6 +148,7 @@ Coral/
 │   ├── data.py              Tokenization + training, analysis, inference collators
 │   ├── attention.py         AttentionAnalyzer for cross-attention extraction
 │   ├── inference.py         Pairwise and streaming all-vs-all inference
+│   ├── prediction_io.py     Parquet prediction parts, checkpoint hashing, score checks
 │   ├── paths.py             Single source of truth for every filesystem path
 │   ├── stats.py             Hierarchical bootstrap, per-unit Cohen's d
 │   ├── head_selection.py    Friedman + Wilcoxon best-vs-rest with BH FDR
@@ -86,17 +160,17 @@ Coral/
 │   ├── download_weights.sh  Fetch the trained checkpoint from Zenodo
 │   ├── download_data.sh     Fetch the benchmark splits from Zenodo
 │   └── download_dnabert_weights.sh
-├── analyses/                One directory per interpretability analysis
-│   ├── contact_analysis/    {scripts,notebooks,results}/  — paper Figure 5
-│   └── RBD_analysis/        {scripts,notebooks,results}/  — paper Figure 6
+├── analyses/
+│   ├── RBD_analysis/        run.sh + scripts/ — attention at RNA-binding domains, paper Figure 4
+│   └── luad_analysis/       scripts/{inputs,steps}/ — lung adenocarcinoma, paper Figure 5
 ├── data/                    All datasets (see "Data availability")
 │   ├── datasets/            Benchmark splits, from Zenodo
-│   ├── pdb/                 PDB pairs, contact annotations, structures
-│   ├── rbd/                 RBD census and Pfam scan inputs
+│   ├── rbd/                 RBD census, whitelist and Pfam scan
 │   ├── predictions/         CORAL inference outputs (regenerable)
 │   ├── sequences/           Derived FASTA (regenerable)
+│   ├── luad/                TCGA LUAD inputs and predictions
 │   └── external/Pfam/       Third-party reference DBs
-├── checkpoints/             coral-epoch-{0..9}/ — LoRA + modules_to_save
+├── checkpoints/             coral-epoch-9/ — released weights, from Zenodo
 ├── DNABERT-2-117M/          RNA encoder source (weights fetched separately)
 ├── examples/                quickstart.py + sample_pairs.csv
 ├── docs/assets/             README figures
@@ -107,12 +181,11 @@ Coral/
 └── LICENSE                  Apache-2.0
 ```
 
-A clone carries only the small analysis inputs under `data/` — the PDB contact
-annotations and the RBD census, about 3 MB. The bulk (splits, Pfam, PDB
-structures, predictions, derived FASTA) is gitignored: it is fetched from Zenodo
-and RCSB or regenerated by the commands below. `checkpoints/` and every
-`results/` directory are gitignored for the same reason. Scripts create their
-output directories if absent, so a fresh clone works.
+A clone carries only small analysis inputs under `data/`, about 6 MB. The bulk is
+gitignored: splits, Pfam, TCGA inputs, predictions and derived FASTA. It is fetched
+from Zenodo and UCSC Xena, or regenerated by the commands below. `checkpoints/` and every
+`results/` directory are gitignored for the same reason. Scripts create their output
+directories if absent, so a fresh clone works.
 
 To send results somewhere other than `analyses/<name>/results/`, set
 `CORAL_RESULTS_DIR`. `src/coral/paths.py` also honours `CORAL_REPO_ROOT`, which
@@ -120,9 +193,17 @@ is only needed if the package is installed non-editably.
 
 ## Model weights
 
-The final checkpoint (epoch 9 of the redundant-split training described in the
-paper) is on Zenodo. `bash scripts/download_weights.sh` puts it in
-`checkpoints/coral-epoch-9/`. Load it via PEFT:
+The released checkpoint is the final model of the paper, used for the attention and
+lung adenocarcinoma analyses. It was trained on the degree-corrected pairs of redundant
+fold 1596, with the training and test sets combined: 25,202 interacting and 25,202
+non-interacting pairs.
+
+- **Settings:** 10 epochs, last epoch kept, learning rate 5 × 10⁻⁵, bfloat16 mixed
+  precision.
+- **Size:** 52.8 M trainable parameters.
+
+`bash scripts/download_weights.sh` puts it in `checkpoints/coral-epoch-9/`. Load it
+via PEFT:
 
 ```python
 from peft import PeftModel
@@ -137,20 +218,25 @@ model = PeftModel.from_pretrained(CoralPretraining(config=config),
                                   str(paths.checkpoint(9))).merge_and_unload()
 ```
 
-> **Weights version.** Versions of this record before v2 contained a checkpoint
-> that does not match the published architecture — it was trained at LoRA rank 8
-> and without the `reverse_projection` module. Use v2 or later. The download
-> script and the badge below both resolve through the concept DOI, which always
-> points at the newest version.
+Two tensors in the checkpoint are not loaded, and PEFT skips them silently: the LoRA
+factors of `protein_encoder.embeddings.position_embeddings`. ESM-2 uses rotary position
+embeddings, so these were never trained, and current `transformers` no longer builds
+the module. Every other tensor in the checkpoint is loaded.
+
+**Weights versions.** The download script and the badge below resolve through the
+concept DOI, which always points at the newest version.
+
+| Version | Contents |
+| --- | --- |
+| v3 (current), [10.5281/zenodo.24465806](https://doi.org/10.5281/zenodo.24465806) | Final model of the paper, degree-corrected negatives (above) |
+| v2, [10.5281/zenodo.21748220](https://doi.org/10.5281/zenodo.21748220) | Preprint model: redundant fold 1596 training set, uniformly sampled negatives |
+| v1 | Does not match the published architecture (LoRA r = 8, no `reverse_projection`); do not use |
 
 **Future work.** A Hugging Face Hub release that lets users skip the
 local DNABERT2 clone and load CORAL with a single `from_pretrained` call is
 on the roadmap.
 
 ## Reproducing paper results
-
-We distinguish three reproduction tiers. Only the first two are expected to
-work on commodity hardware; the third is a reference implementation.
 
 ### (a) Inference with the trained model
 
@@ -167,132 +253,158 @@ Parquet parts. Existing compatible parts are validated and resumed automatically
 
 ```bash
 torchrun --standalone --nproc_per_node=2 scripts/predict_all_vs_all.py \
-  --rnas data/TCGA/luad_rna_sequences.parquet \
-  --proteins data/TCGA/luad_proteins.tsv \
-  --output-dir data/TCGA/luad_predictions
+  --rnas data/luad/luad_rna_sequences.parquet \
+  --proteins data/luad/luad_proteins.tsv \
+  --output-dir data/luad/luad_predictions
 ```
 
 Interactive runs show one progress bar per rank, measured in completed RNAs. Progress
 resumes from validated parts; routine part writes do not add log lines above the bars.
 
-### (b) Reproduce Table 2 from the trained model + released splits
+### (b) Benchmark (Figure 3)
 
-Reasonable on a single GPU with ≥ 8 GB VRAM; each fold scores roughly
-10,000 RNA-protein pairs.
+Each value in Figure 3 averages five models, one per fold. Each model was trained on its
+fold's `train.csv` and scored on its `val.csv`, the test set.
 
-```bash
-bash scripts/download_data.sh  # one-off; pulls the 25 folds from Zenodo
+- **Epoch:** for each method, the epoch with the highest five-fold mean AUC.
+- **Threshold for accuracy and F1:** set per fold to the mean of the median scores
+  the model gave the test sets of the other four folds.
 
-python scripts/predict.py \
-  --input-csv data/datasets/componentwise_splits_60_80/fold_2161/val.csv \
-  --output results/componentwise_60_80_fold_2161.csv
-```
-
-### (c) Retrain from scratch (reference implementation)
-
-Hardware-dependent. Training uses the full non-truncated sequences
-(proteins up to 1,250 aa, RNAs up to 6,000 nt) and bfloat16 autocast; in
-practice this requires a GPU with 24-40 GB VRAM. We provide the script but
-do not guarantee out-of-the-box reproduction on smaller accelerators.
+Training uses the full sequences (proteins up to 1,250 aa, RNAs up to 6,000 nt) with
+bfloat16 autocast. In practice this needs a GPU with 24–40 GB of VRAM; we provide the
+script but do not guarantee out-of-the-box reproduction on smaller accelerators.
 
 ```bash
+bash scripts/download_data.sh   # one-off; 15 folds into data/datasets/
+
 python scripts/train.py \
-  --split componentwise_splits_60_80 \
-  --fold 2161 \
-  --epochs 10
+  --split pairwise_splits_60_80 \
+  --fold 628 \
+  --epochs 10 \
+  --lr 5e-5
 ```
 
-## Regenerating the interpretability analyses
+The paper used 5 × 10⁻⁵ for every trainable parameter on the redundant and pairwise
+splits. On the component-wise split it used two rates:
 
-Both analyses run from the repo root and read `checkpoints/coral-epoch-9/`.
-Each screens its own attention heads: do not assume a head subset carries from
-one analysis to the other. Results land in `analyses/<name>/results/`, with
-`heads_all/` averaging all 12 heads and `heads_best/` averaging the screened
-subset.
+- 1 × 10⁻⁶ for the LoRA corrections of the encoders;
+- 1 × 10⁻⁵ for the cross-modality encoder, the protein projection and the heads.
 
-### Contact analysis (Figure 5)
+`scripts/train.py` applies one rate (`--lr`) to every trainable parameter and does not
+implement this two-rate setup yet.
 
-Tests whether cross-attention is elevated at residue-level contacts in PDB
-complexes. The score is the geometric mean of the RNA→protein and protein→RNA
-directions, taken from the last cross-attention layer. Head screening selects
-`[0, 7]`.
+### (c) Attention at RNA-binding domains (Figure 4)
+
+Tests whether protein-side attention is higher inside Pfam-annotated RNA-binding
+domains than outside them. Attention is averaged over the RNA axis and over all of a
+protein's partners, and the unit of analysis is the protein.
+
+The cohort comes from the 25,202 interacting pairs of redundant fold 1596 (train and
+test):
+
+1. The released model scores 24,708 of these pairs as interacting (p > 0.5), across
+   4,141 proteins.
+2. Of those proteins, 669 carry an annotated domain from the 85 whitelisted families.
+3. 496 of them pass the length and domain-coverage filters.
+
+`analyses/RBD_analysis/run.sh` runs the whole pipeline: scoring, Pfam annotation,
+head screen, test, controls and figure. The Pfam hits of every protein the released
+model calls interacting are committed in `data/rbd/`, so neither HMMER nor Pfam-A is
+needed. It takes about 30 min on two GPUs; `analyses/RBD_analysis/README.md` lists the
+steps, inputs and outputs.
 
 ```bash
-python analyses/contact_analysis/scripts/screen_attention_heads.py
-python analyses/contact_analysis/scripts/attention_analysis.py            # heads_all
-python analyses/contact_analysis/scripts/attention_analysis.py \
-    --selected-heads analyses/contact_analysis/results/selected_heads.json  # heads_best
-python analyses/contact_analysis/scripts/plot_figure5.py
+CKPT=checkpoints/coral-epoch-9 bash analyses/RBD_analysis/run.sh
 ```
 
-Panel b (3D structures) additionally needs `pymol-open-source`:
+Expected results:
 
-```bash
-python analyses/contact_analysis/scripts/build_panelb_sessions.py
-# then pick camera angles in analyses/contact_analysis/notebooks/panel_b_camera.ipynb
-```
+- **Heads:** the screen selects heads `[5, 10, 11]`.
+- **Main test:** 467/496 proteins have Δ > 0, and mean Δ = 2.65e-03 (bootstrap 95% CI
+  [2.46e-03, 2.85e-03]). One-sample t = 26.2, p = 7.6e-96.
+- **Effect size:** per-protein Cohen's d has a median of 0.88 and a mean of 0.85.
+- **Position-shuffle null:** empirical p = 0.001, with the observed value 33 null SDs
+  above the null mean.
+- **Domain families:** 13 of 14 are positive after BH correction; PUA is the exception.
 
-Expected (`heads_best`): 309 complexes, mean Δ = 5.12e-03, one-sample
-t = 9.79, p = 3.5e-20; 244/309 complexes have Δ > 0; bootstrap 95% CI
-[4.15e-03, 6.19e-03]; per-complex Cohen's d mean 0.35, median 0.31.
-The whole run takes under a minute on a single GPU.
+### (d) Lung adenocarcinoma (Figure 5)
 
-### RBD analysis (Figure 6)
+The workflow has two parts:
 
-Tests whether protein-side attention, marginalized over the RNA axis, is
-elevated at annotated RNA-binding domains. The unit of analysis is the protein.
-Head screening selects head `[2]` — notably *not* the pair contact analysis
-selects.
+1. **Inputs.** `analyses/luad_analysis/scripts/inputs/`
+   downloads and prepares the TCGA LUAD data: expression from UCSC Xena (Toil, GENCODE
+   v23), the cohorts, the transcript sequences and the tumour purity estimates.
+   `run_inference.sh` then scores the transcripts against IGF2BP1, IGF2BP3 and LIN28B
+   with the checkpoint named in that directory's `config.json`.
+2. **Analysis.** Steps s1–s6, s8 and the main figure run in about 5 min on CPU.
 
-Steps 1–3 build the RBD annotations and need `hmmer` plus a local Pfam-A copy
-in `data/external/Pfam/`:
+The directory's README gives the commands, the two files to place by hand and the
+figure each script draws.
 
-```bash
-jupyter execute analyses/RBD_analysis/notebooks/01_build_rbd_whitelist.ipynb
-jupyter execute analyses/RBD_analysis/notebooks/02_build_protein_fasta.ipynb
-bash analyses/RBD_analysis/scripts/run_hmmscan.sh
-python analyses/RBD_analysis/scripts/parse_rbd_domtbl.py \
-    --domtbl data/rbd/predicted_interacting_proteins.domtbl \
-    --fasta data/sequences/predicted_interacting_proteins.fa \
-    --rbd-json data/rbd/semiconservative_rbd2pfam.json \
-    --out analyses/RBD_analysis/results/rbd_annotations
-```
+Every step checks the SHA-256 of its inputs and of the checkpoint the predictions were
+made with.
 
-Then the test, controls and figures:
+Expected results:
 
-```bash
-python analyses/RBD_analysis/scripts/screen_attention_heads.py \
-    --predictions data/predictions/val_1596_predicted.csv
-python analyses/RBD_analysis/scripts/attention_analysis.py            # heads_all
-python analyses/RBD_analysis/scripts/attention_analysis.py \
-    --selected-heads analyses/RBD_analysis/results/selected_heads.json  # heads_best
-python analyses/RBD_analysis/scripts/controls.py --heads best
-python analyses/RBD_analysis/scripts/plot_figure6.py
-```
+| Quantity | IGF2BP1 | IGF2BP3 | LIN28B |
+| --- | --- | --- | --- |
+| Positive tumours | 86 | 308 | 24 |
+| Eligible transcripts | 33,342 | 32,811 | 32,955 |
+| Panel size (top 1%) | 334 | 329 | 330 |
 
-Expected (`heads_best`): 462 proteins, mean Δ = 2.95e-03, one-sample
-t = 27.08, p = 1.2e-97; 435/462 proteins have Δ > 0; bootstrap 95% CI
-[2.74e-03, 3.17e-03]; per-protein Cohen's d mean 0.88, median 0.94. The effect
-survives the position-shuffle null (p < 0.001) and holds across domain families.
+- **Stage, IGF2BP1:** ρ = −0.27 (95% CI −0.46 to −0.07), q = 0.031. Competitive
+  P = 0.027 (0.018 with GC content also matched).
+- **N given T:** ρ = −0.19, competitive P = 0.018.
+- **T given N:** ρ = −0.28, competitive P = 0.77.
 
 ## Data availability
 
-All training and benchmarking splits are archived on Zenodo and fetched with
+All training and benchmarking splits are archived on Zenodo (current version v3,
+[10.5281/zenodo.24466337](https://doi.org/10.5281/zenodo.24466337)) and fetched with
 `scripts/download_data.sh` into `data/datasets/`.
 
-- **Positive pairs** were compiled from RNAInter, RPI488, RPI369, RPI2241, and
-  RPI1807. We retained RNAInter interactions tagged as strong experimental
-  evidence; from the RPI datasets we kept only positives. Proteins longer
-  than 1,250 aa and RNAs longer than 6,000 nt were excluded, yielding 24,012
-  high-confidence positive interactions.
-- **Splits** come in five folds per strategy: redundant, pairwise at
-  80/60% and 50/30% RNA/protein identity, component-wise at the same two
-  thresholds (25 folds total). Negative pairs are random RNA-protein
-  re-pairings within the same split, balanced 1:1 with positives.
-- **PDB contacts** (`data/pdb/`) define structurally resolved interface
-  residues at ≤3.4 Å inter-atomic distance. Needed for the contact analysis.
-- **RBD inputs** (`data/rbd/`) are the Gerstberger RBP/RBD census plus the
-  Pfam scan outputs used to annotate RNA-binding domains.
+- **Positive pairs** come from five sources:
+  - RNAInter, keeping only interactions tagged as strong experimental evidence;
+  - RPI488, RPI369, RPI2241 and RPI1807, keeping only their positives.
+
+  Proteins longer than 1,250 aa and RNAs longer than 6,000 nt were excluded, leaving
+  25,202 interacting pairs. RNAs are written in their DNA form (U as T), the form
+  DNABERT-2 was pretrained on.
+- **Sequence clusters.** RNAs and proteins were clustered separately with MMseqs2: 60%
+  identity for proteins, 80% for RNAs, 60% coverage.
+- **Splits.** Three strategies of increasing stringency, five folds each (15 folds):
+
+  | Split | Assignment unit | Training pairs | Test pairs |
+  | --- | --- | --- | --- |
+  | Redundant (`redundant_split`) | Pairs, at random | 40,322 | 10,082 |
+  | Pairwise (`pairwise_splits_60_80`) | Interaction clusters | 38,154–38,202 | 9,822–9,870 |
+  | Component-wise (`componentwise_splits_60_80`) | RNA and protein clusters, independently | 22,110–24,100 | 3,744–4,264 |
+
+  - **Pairwise:** no test pair shares both its RNA cluster and its protein cluster
+    with a training pair.
+  - **Component-wise:** pairs with one molecule on each side are discarded, so no test
+    RNA or protein has a relative in training.
+  - **Fold choice:** the five folds of each non-redundant split were chosen among
+    100,000 random assignments. Each has at least 11,000 training positives, and the
+    choice maximises the number of test positives.
+- **Negative pairs** are combinations of the set's own molecules that are not reported
+  to interact. They are drawn separately for each training and test set and balanced
+  1:1 with positives.
+  - **Degree correction:** each molecule receives c = (1 − λ)·n + λ·d negatives, with
+    λ = 0.5. Here n is its count under uniform sampling and d its number of
+    interacting partners, so every molecule keeps half of the imbalance that uniform
+    sampling creates.
+  - **Excluded:** reported interactions, duplicate negatives, and training negatives
+    that also occur as test negatives of the same fold.
+- **Layout.** `data/datasets/<split>/fold_<seed>/{train,val}.csv`, with columns
+  `RNA_id, Protein_id, labels, RNA_seqs, Prot_seqs`; `val.csv` is the test set.
+- **Uniformly sampled negatives.** Supplementary Figure 2 uses splits whose negatives
+  were sampled uniformly over molecules. They stay in v1 of the data record,
+  [10.5281/zenodo.19730810](https://doi.org/10.5281/zenodo.19730810), together with the
+  30/50 identity splits of the preprint. v1 and v3 hold the same interacting pairs,
+  splits and folds; only the negatives differ. Do not use v2: its archive is incomplete.
+- **RBD inputs** (`data/rbd/`) are the Gerstberger RBP/RBD census, the 85-family RBD
+  whitelist derived from it, and the Pfam scan of every protein in the analysis.
 
 Licensing of the redistributed data follows the licenses of the source
 databases; consult each source for details.

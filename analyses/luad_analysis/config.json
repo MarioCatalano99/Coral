@@ -1,0 +1,55 @@
+{
+  "checkpoint": "checkpoints/coraldegree50-fulldataset-epoch-9",
+  "sources": {
+    "expression": {"file": "luad_expression.parquet", "sha256": "74babdadd6791249d7095cdd75187fe49bcd87442653cc74b2aa38ecebb418a3"},
+    "transcripts": {"file": "luad_transcripts.parquet", "sha256": "761d7b7434c51967d49ae3417e7d088fe7a1940f4fbe7f6d60c834175c0c902a"},
+    "samples": {"file": "luad_samples.tsv", "sha256": "59c62901d8b7e997f70fd25eddc49fceaac6ffc3d34933bc0a69ff46960fb2fd"},
+    "clinical_gdc": {"file": "luad_samples_GDC_metadata.txt", "sha256": "1d5f326678deff34a4503d0a01c9ec58409f5c97884754ffc33cdf23be3604e4"},
+    "purity": {"file": "luad_sources/ncomms9971-s2.xlsx", "sha256": "fce1ba13ff3a6432b7e4f260eb516e407c967d615ca87bc8dffa7765baf97529"}
+  },
+  "inputs": {
+    "rbp_genes": {
+      "O00425-1": {"gene_id": "ENSG00000136231.13", "gene_symbol": "IGF2BP3", "transcript_count": 18},
+      "Q6ZN17-1": {"gene_id": "ENSG00000187772.6", "gene_symbol": "LIN28B", "transcript_count": 1},
+      "Q9NZI8-1": {"gene_id": "ENSG00000159217.9", "gene_symbol": "IGF2BP1", "transcript_count": 6}
+    },
+    "rbp_proxy": "sum TPM of transcripts with transcript_biotype == protein_coding",
+    "rbp_tpm_cutoff": 1.0,
+    "target_tpm_cutoff": 1.0,
+    "sensitivity_tpm_cutoff": 0.5,
+    "prevalence_fraction": 0.1,
+    "max_rna_nt": 6000,
+    "expected_samples": {"tumors": 513, "normals": 59, "matched_pairs": 58}
+  },
+  "rbps": {
+    "IGF2BP1": {"protein_id": "Q9NZI8-1", "gene_id": "ENSG00000159217.9"},
+    "IGF2BP3": {"protein_id": "O00425-1", "gene_id": "ENSG00000136231.13"},
+    "LIN28B": {"protein_id": "Q6ZN17-1", "gene_id": "ENSG00000187772.6"}
+  },
+  "cohort": {
+    "rbp_coding_tpm_above": 1.0,
+    "expected_positive": {"IGF2BP1": 86, "IGF2BP3": 308, "LIN28B": 24}
+  },
+  "universe": {
+    "target_tpm_at_least": 1.0,
+    "min_fraction_of_positive_tumors": 0.5,
+    "max_rna_nt": 6000
+  },
+  "panel": {
+    "top_fraction": 0.01
+  },
+  "stage": {
+    "alpha": 0.05,
+    "permutations": 99999,
+    "bootstraps": 2000,
+    "random_panels": 9999,
+    "expression_bins": 10,
+    "length_bins": 5,
+    "gc_bins": 5,
+    "seed": 20261118
+  },
+  "followup": {
+    "rbp": "IGF2BP1",
+    "outcome": "stage"
+  }
+}

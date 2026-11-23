@@ -1,0 +1,4 @@
+rbp	positive_tumors	min_tumors_expressed	expressed_transcripts	excluded_longer_than_max	excluded_non_acgt	universe_transcripts	universe_genes
+IGF2BP1	86	43	35584	2241	1	33342	13585
+IGF2BP3	308	154	35049	2237	1	32811	13514
+LIN28B	24	12	35144	2188	1	32955	13409

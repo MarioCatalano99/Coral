@@ -224,6 +224,9 @@ def main():
     ap.add_argument("--min-partners", type=int, default=1,
                     help="Drop proteins backed by fewer TP partners than this.")
     ap.add_argument("--epoch", type=int, default=9)
+    ap.add_argument("--checkpoint", type=Path, default=None,
+                    help="LoRA checkpoint directory. Overrides --epoch "
+                         "(default: checkpoints/coral-epoch-<epoch>).")
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--rna-max-length", type=int, default=6000)
     ap.add_argument("--protein-max-length", type=int, default=1250)
@@ -264,7 +267,7 @@ def main():
         rbd_intervals=rbd_intervals,
         protein_summary=protein_summary,
         selected_heads=selected_heads,
-        checkpoint_dir=str(paths.checkpoint(args.epoch)),
+        checkpoint_dir=str(args.checkpoint or paths.checkpoint(args.epoch)),
         device=device,
         batch_size=args.batch_size,
         rna_max_length=args.rna_max_length,

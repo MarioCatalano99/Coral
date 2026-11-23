@@ -23,12 +23,10 @@ needs your CORAL prediction table and is intentionally NOT applied here as
 predicted_interacting_proteins.fa already contains only proteins that satisfy
 the threshold
 
-Example (run from repo root):
-  bash analyses/RBD_analysis/scripts/run_hmmscan.sh
-
+Example (run from repo root; run.sh step 3 does this):
   python analyses/RBD_analysis/scripts/parse_rbd_domtbl.py \\
-      --domtbl data/rbd/predicted_interacting_proteins.domtbl \\
-      --fasta data/sequences/predicted_interacting_proteins.fa \\
+      --domtbl data/rbd/scanned_proteins.domtbl \\
+      --fasta data/sequences/<checkpoint>/predicted_interacting_proteins.fa \\
       --rbd-json data/rbd/semiconservative_rbd2pfam.json \\
       --out analyses/RBD_analysis/results/rbd_annotations
 """

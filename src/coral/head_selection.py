@@ -1,10 +1,8 @@
-"""Per-head screening shared across attention analyses.
+"""Per-head screening for attention analyses.
 
-The screening recipe mirrors what `contact_analysis/attention_heads_analysis.py`
-introduced: Friedman across heads on per-unit Δ; if significant, Wilcoxon
-signed-rank post-hoc of best-by-median head vs each other head with
-Benjamini–Hochberg FDR. Heads not significantly different from the best
-are retained.
+Friedman across heads on per-unit Δ; if significant, Wilcoxon signed-rank
+post-hoc of best-by-median head vs each other head with Benjamini–Hochberg
+FDR. Heads not significantly different from the best are retained.
 """
 
 from typing import List

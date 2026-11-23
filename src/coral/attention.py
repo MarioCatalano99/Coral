@@ -5,9 +5,9 @@ takes the **last** cross-attention layer, optionally averages a subset of heads,
 and strips CLS/SEP/PAD positions so the returned matrices line up with raw
 sequence coordinates.
 
-`contact_labels` is optional: the contact analysis passes 2D contact matrices and
-gets them cropped in step with the attention, while the RBD analysis passes
-nothing and only needs the special-token stripping.
+`contact_labels` is optional: 2D per-pair label matrices passed here are cropped
+in step with the attention. The RBD analysis passes nothing and only needs the
+special-token stripping.
 """
 
 from typing import Dict, List, Optional

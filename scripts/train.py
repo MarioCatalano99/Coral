@@ -2,14 +2,13 @@
 
 Reference implementation of the protocol described in the paper Methods.
 Retraining is hardware-dependent (expect ~24-40 GB VRAM on the longest
-sequences); the released weights at `checkpoints/coral-epoch-9/` are the
-recommended starting point for inference and reproduction of Table 2.
+sequences). Benchmark values need one model per fold: the released weights at
+`checkpoints/coral-epoch-9/` were trained on every positive pair of the
+benchmark, so they serve inference, not evaluation on the released splits.
 
-Known seed --> fold-size combinations used in the paper:
+Folds used in the paper (subdirectories of each split):
   # componentwise, 60/80: [256, 294, 2161, 21624, 74750]
-  # componentwise, 30/50: [460, 4708, 5608, 43483, 55152]
   # pairwise,      60/80: [628, 4021, 11471, 14300, 53128]
-  # pairwise,      30/50: [558, 5169, 5765, 8990, 24160]
   # redundant:          [1596, 3587, 9070, 29690, 77770]
 """
 
@@ -49,7 +48,7 @@ from coral.model import CoralConfig, CoralPretraining
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--split", required=True,
-                   help="Dataset split name, e.g. componentwise_splits_60_80, pairwise_splits_30_50, redundant_split")
+                   help="Dataset split name: redundant_split, pairwise_splits_60_80 or componentwise_splits_60_80")
     p.add_argument("--fold", type=int, required=True,
                    help="Fold random-seed identifier (subdirectory name under the split)")
     p.add_argument("--data-root", default=str(paths.DATASETS_DIR),

@@ -35,7 +35,7 @@ from coral.data import (
 )
 from coral.inference import iter_all_vs_all_predictions
 from coral.model import CoralConfig, CoralPretraining
-from coral.prediction_io import sha256_file, validate_scores
+from coral.prediction_io import checkpoint_hash, sha256_file, validate_scores
 
 
 LOGGER = logging.getLogger("coral.all_vs_all")
@@ -83,22 +83,6 @@ def read_table(path: Path) -> pd.DataFrame:
     if path.suffix == ".csv":
         return pd.read_csv(path)
     raise ValueError(f"unsupported manifest format: {path}")
-
-
-def checkpoint_hash(path: Path) -> str:
-    """Hash checkpoint filenames and contents deterministically."""
-    if path.is_file():
-        return sha256_file(path)
-    if not path.is_dir():
-        raise FileNotFoundError(path)
-    digest = hashlib.sha256()
-    files = sorted(item for item in path.rglob("*") if item.is_file() and "__pycache__" not in item.parts and not item.name.startswith("."))
-    if not files:
-        raise ValueError(f"checkpoint directory is empty: {path}")
-    for file_path in files:
-        digest.update(str(file_path.relative_to(path)).encode())
-        digest.update(bytes.fromhex(sha256_file(file_path)))
-    return digest.hexdigest()
 
 
 def execution_context() -> tuple[int, int, int, torch.device]:

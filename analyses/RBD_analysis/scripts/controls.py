@@ -13,9 +13,10 @@ Reads the per-protein attention vectors cached by `attention_analysis.py` and:
 
 2. Family stratification: split proteins by `dominant_rbd` and re-run a small
    meta-analysis (one-sample t, Cohen's d on per-protein Δ) per family with
-   ≥ N proteins. Cohen's d is reported with a percentile 95% CI from an
-   ordinary row bootstrap — each row is one protein, so rows are already
-   independent and need no clustering.
+   ≥ N proteins. The one-sided p-values are also Benjamini–Hochberg adjusted
+   across all reported families (`p_adj_BH`). Cohen's d is reported with a
+   percentile 95% CI from an ordinary row bootstrap — each row is one protein,
+   so rows are already independent and need no clustering.
 
 The `--heads` flag selects which upstream cache to consume: 'all' = average
 over all 12 heads, 'best' = average over the screened subset. Must match the
@@ -33,6 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import stats
+from statsmodels.stats.multitest import multipletests
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))  # no-op once `pip install -e .` has been run
@@ -99,7 +101,8 @@ def family_stratified(stats_df: pd.DataFrame,
                       rng: np.random.Generator) -> pd.DataFrame:
     """Per-family one-sample t-test on per-protein mean_diff plus a bootstrap CI
     for Cohen's d. One row of the upstream stats DF is one protein, so
-    `n_proteins` is just the family's row count."""
+    `n_proteins` is just the family's row count. `p_adj_BH` is the BH-adjusted
+    `p_value` across every family reported here (those with ≥ min_proteins)."""
     rows = []
     for family, sub in stats_df.groupby("dominant_rbd"):
         if family == "" or len(sub) < min_proteins:
@@ -118,7 +121,13 @@ def family_stratified(stats_df: pd.DataFrame,
             "d_lo": d_lo,
             "d_hi": d_hi,
         })
-    return pd.DataFrame(rows).sort_values("cohens_d", ascending=False)
+    fam = pd.DataFrame(rows)
+    if fam.empty:
+        return fam
+    # --- Multiple comparisons: "k of N families significant" is a claim over N tests ---
+    fam.insert(fam.columns.get_loc("p_value") + 1, "p_adj_BH",
+               multipletests(fam["p_value"], method="fdr_bh")[1])
+    return fam.sort_values("cohens_d", ascending=False)
 
 
 def main():

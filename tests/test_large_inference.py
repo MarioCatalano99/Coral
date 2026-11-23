@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from coral.inference import iter_all_vs_all_predictions, predict_all_vs_all_interactions
 from coral.data import DataCollatorForInference, validate_sequence_frame
 from coral.model import CoralPretraining
+from coral.prediction_io import checkpoint_hash, read_predictions, sha256_file
 from scripts.predict_all_vs_all import (
     read_completed_rnas,
     write_part_atomic,
@@ -337,6 +338,43 @@ class LargeInferenceTests(unittest.TestCase):
                 expected_rows=2,
             )
             self.assertTrue((output_dir / "rank-00000-manifest.json").is_file())
+
+
+    def test_completed_prediction_run_requires_exact_cartesian_product(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            rnas, proteins = root / "rnas.parquet", root / "proteins.tsv"
+            pd.DataFrame({"RNA_id": ["r1", "r2"]}).to_parquet(rnas, index=False)
+            pd.DataFrame({"Protein_id": ["P1", "P2"]}).to_csv(proteins, sep="\t", index=False)
+            frame = pd.DataFrame({"RNA_id": ["r1", "r1", "r2", "r2"], "Protein_id": ["P1", "P2"] * 2, "logit_margin": [0.] * 4,
+                                  "interaction_probability": [0.5] * 4, "prediction": [0] * 4})
+            config = {"rank": 0, "world_size": 1, "precision": "float32", "run_hash": "test",
+                      "rna_manifest_sha256": sha256_file(rnas), "protein_manifest_sha256": sha256_file(proteins)}
+            part = root / "rank-00000-part-000000.parquet"
+            write_part_atomic(frame, part, "test", 0)
+            write_rank_manifest(root, 0, config, 4)
+            self.assertEqual(len(read_predictions(root, rnas, proteins)[0]), 4)
+            # Even a newly hashed manifest cannot legitimize a missing Cartesian pair.
+            write_part_atomic(frame.iloc[:-1], part, "test", 0)
+            write_rank_manifest(root, 0, config, 3)
+            with self.assertRaisesRegex(ValueError, "Cartesian"):
+                read_predictions(root, rnas, proteins)
+            # Untracked parts must also be rejected.
+            write_part_atomic(frame, part, "test", 0)
+            write_rank_manifest(root, 0, config, 4)
+            write_part_atomic(frame, root / "rank-00000-part-000001.parquet", "test", 0)
+            with self.assertRaisesRegex(ValueError, "unlisted"):
+                read_predictions(root, rnas, proteins)
+
+    def test_checkpoint_hash_tracks_names_and_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            (root / "adapter_model.safetensors").write_bytes(b"weights")
+            (root / "adapter_config.json").write_text("{}")
+            first = checkpoint_hash(root)
+            self.assertEqual(first, checkpoint_hash(root))
+            (root / "adapter_model.safetensors").write_bytes(b"other weights")
+            self.assertNotEqual(first, checkpoint_hash(root))
 
 
 if __name__ == "__main__":

@@ -26,7 +26,6 @@ PROTEIN_ENCODER = "facebook/esm2_t30_150M_UR50D"
 
 # --- Shared inputs --------------------------------------------------------- #
 DATA_DIR = REPO_ROOT / "data"
-PDB_DIR = DATA_DIR / "pdb"                  # contact-analysis inputs
 RBD_DIR = DATA_DIR / "rbd"                  # RBD-analysis inputs
 DATASETS_DIR = DATA_DIR / "datasets"        # train/val splits (Zenodo)
 PREDICTIONS_DIR = DATA_DIR / "predictions"  # CORAL inference outputs
@@ -50,7 +49,7 @@ def checkpoint(epoch: int) -> Path:
 
 
 def analysis_dir(analysis: str) -> Path:
-    """Root directory for a named analysis ('contact_analysis', 'RBD_analysis')."""
+    """Root directory for a named analysis (e.g. 'RBD_analysis')."""
     return ANALYSES_DIR / analysis
 
 
